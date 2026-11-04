@@ -9,7 +9,7 @@ final class SnippetViz: Visualizer {
         let want = max(8, Int(s.snippetSeconds * a.sampleRate / Double(Analyzer.chunk)))
         let laneCount = s.stereo ? 2 : 1
         let laneH = h / Float(laneCount)
-        let scale = laneH * 0.46 * Float(s.gain * s.zoom)
+        let scale = laneH * 0.46 * Float(s.gain * s.zoom * s.reach)
 
         for lane in 0..<laneCount {
             let cy = laneH * (Float(lane) + 0.5)

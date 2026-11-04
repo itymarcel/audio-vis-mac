@@ -19,6 +19,11 @@ struct SettingsPanel: View {
                         ForEach(SphereLayout.allCases) { Text($0.title).tag($0) }
                     }
                     Hint(store.s.sphereLayout.hint)
+                } else if mode == .oscilloscope {
+                    Picker("Shape", selection: $store.s.scopeShape) {
+                        ForEach(ScopeShape.allCases) { Text($0.title).tag($0) }
+                    }
+                    Hint(store.s.scopeShape.hint)
                 } else {
                     Hint(mode.hint)
                 }
@@ -29,6 +34,8 @@ struct SettingsPanel: View {
                 .knob(.style, mode)
                 detailRow
             }
+
+            PresetSection(store: store, app: app)
 
             Section("Colour") {
                 Picker("Palette", selection: $store.s.palette) {
@@ -49,11 +56,18 @@ struct SettingsPanel: View {
                 Picker("FFT size", selection: $store.s.fftSize) {
                     ForEach([2048.0, 4096, 8192, 16384, 32768], id: \.self) { Text("\(Int($0))").tag($0) }
                 }
-                .help("Bigger = finer frequency detail (good for huge point counts), slower response.")
+                .help("Bigger = finer frequency detail (good for huge point counts), slower response. Waveform modes don't use the FFT.")
+                .knob(.fft, mode)
+                Toggle("Low latency", isOn: $store.s.lowLatency)
+                    .knob(.fft, mode)
+                    .disabled(mode == .spectrogram)
+                    .help("Above ~200 Hz use short FFTs, so drums and vocals react within ~20 ms. The FFT size then only sets the bass detail.")
                 SliderRow("Gain", $store.s.gain, 0.2...5, "%.2f×").knob(.gain, mode)
                 SliderRow("Floor", $store.s.floorDB, -120...(-30), "%.0f dB").knob(.floor, mode)
                 SliderRow("Tilt", $store.s.tilt, 0...6, "%.1f dB").knob(.tilt, mode)
-                SliderRow("Smoothing", $store.s.smoothing, 0...0.97, "%.2f").knob(.smoothing, mode)
+                SliderRow("Smoothing", $store.s.smoothing, 0...0.97) { Self.fallLabel(store.s.smoothing) }
+                    .knob(.smoothing, mode)
+                    .help("How slowly levels fall back after a hit. Rises are always instant.")
                 SliderRow("Low freq", logBinding(\.minFreq), log10(20)...log10(1000)) { hz(store.s.minFreq) }
                     .knob(.freqRange, mode)
                 SliderRow("High freq", logBinding(\.maxFreq), log10(1500)...log10(22000)) { hz(store.s.maxFreq) }
@@ -66,6 +80,8 @@ struct SettingsPanel: View {
                 SliderRow("Trails", $store.s.persistence, 0...1, "%.2f").knob(.persistence, mode)
                 SliderRow("Motion", $store.s.motion, 0...2, "%.2f").knob(.motion, mode)
                 SliderRow("Zoom", $store.s.zoom, 0.3...2.5, "%.2f×").knob(.zoom, mode)
+                SliderRow("Reach", $store.s.reach, 0...4, "%.2f×").knob(.reach, mode)
+                    .help("How far things travel: sphere bulge, spoke length, particle steps, trace height.")
                 HStack {
                     Toggle("Stereo", isOn: $store.s.stereo).knob(.stereo, mode)
                     Toggle("Mirror", isOn: $store.s.mirror).knob(.mirror, mode)
@@ -101,7 +117,7 @@ struct SettingsPanel: View {
 
             Section {
                 Button("Reset look") { store.resetLook() }
-                Hint("1–6 modes · S settings · Space freeze · F full screen · T on top")
+                Hint("1–8 modes · S settings · Space freeze · F full screen · T on top · R reset view")
             }
         }
         .formStyle(.grouped)
@@ -156,6 +172,12 @@ struct SettingsPanel: View {
 
     private func logBinding(_ kp: WritableKeyPath<VizSettings, Double>) -> Binding<Double> {
         Binding(get: { log10(store.s[keyPath: kp]) }, set: { store.s[keyPath: kp] = pow(10, $0).rounded() })
+    }
+
+    /// Fall time to ~10 % (2.3 time constants), e.g. "60 ms" / "1.2 s".
+    static func fallLabel(_ smoothing: Double) -> String {
+        let t = Envelope.fallTau(smoothing) * 2.3
+        return t < 1 ? String(format: "%.0f ms", t * 1000) : String(format: "%.1f s", t)
     }
 
     private func hz(_ f: Double) -> String {
@@ -220,5 +242,70 @@ extension Double {
     func rounded(toPlaces p: Int) -> Double {
         let m = pow(10, Double(p))
         return (self * m).rounded() / m
+    }
+}
+
+/// Named looks: pick to apply, Save As… a new name, overwrite the selected one, delete it.
+struct PresetSection: View {
+    @Bindable var store: SettingsStore
+    @Bindable var app: AppState
+    @State private var selected = ""
+    @State private var naming = false
+    @State private var newName = ""
+    @State private var confirmDelete = false
+
+    var body: some View {
+        Section("Presets") {
+            if store.presetNames.isEmpty {
+                Hint("No presets yet. Save As… stores the current look under a name.")
+            } else {
+                Picker("Preset", selection: $selected) {
+                    Text("None").tag("")
+                    ForEach(store.presetNames, id: \.self) { name in
+                        Text(name == selected && !store.matches(name) ? "\(name) (edited)" : name).tag(name)
+                    }
+                }
+                .onChange(of: selected) { _, name in if !name.isEmpty { store.applyPreset(name) } }
+            }
+            HStack(spacing: 8) {
+                Button("Save As…") {
+                    newName = selected
+                    naming = true
+                }
+                Button("Overwrite") { store.savePreset(selected) }
+                    .disabled(selected.isEmpty || store.matches(selected))
+                    .help("Save the current look into the selected preset")
+                Button("Delete") { confirmDelete = true }
+                    .disabled(selected.isEmpty)
+                Spacer()
+            }
+            .buttonStyle(.bordered)
+            // Presentation modifiers live on this single row (not the Section) so they attach exactly once.
+            .alert("Save Preset", isPresented: $naming) {
+                TextField("Name", text: $newName)
+                Button("Save") { saveNew() }
+                Button("Cancel", role: .cancel) {}
+            } message: {
+                Text("Saves the current look. Using an existing name replaces that preset.")
+            }
+            .confirmationDialog("Delete preset \u{201C}\(selected)\u{201D}?", isPresented: $confirmDelete) {
+                Button("Delete", role: .destructive) {
+                    store.deletePreset(selected)
+                    selected = ""
+                }
+            }
+            // Single-key shortcuts (S, F, Space…) would swallow typing while the name dialog is open.
+            .onChange(of: naming) { _, open in app.textEditing = open }
+        }
+        .onAppear {
+            if selected.isEmpty, let match = store.presetNames.first(where: { store.matches($0) }) { selected = match }
+        }
+    }
+
+    private func saveNew() {
+        let n = newName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !n.isEmpty else { return }
+        store.savePreset(n)
+        selected = n
     }
 }

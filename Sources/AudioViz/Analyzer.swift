@@ -18,6 +18,15 @@ final class Analyzer {
     private(set) var peakLevel: Float = 0
     private(set) var dominantHz: Double = 0
     private var lastWritten: Int64 = 0
+    /// Smoothed read position (absolute frame). Advances at the sample rate and eases toward the newest audio,
+    /// so devices that deliver in uneven bursts don't make the picture lurch and stall.
+    private var playhead: Double = -1
+    private var lastUpdate: Double = 0
+    private(set) var readEnd: Int64 = 0
+    /// Latency the playhead keeps behind the newest audio (ms), for the FPS overlay.
+    private(set) var bufferMs: Double = 0
+    private(set) var ioBurst: Double = 0
+    private static let trace = ProcessInfo.processInfo.environment["AUDIOVIZ_TRACE"] != nil
 
     private var fft: vDSP.FFT<DSPSplitComplex>
     private var window: [Float]
@@ -25,6 +34,51 @@ final class Analyzer {
     private var re: [Float]
     private var im: [Float]
     private var sq: [Float]
+
+    /// Short FFTs for the multi-resolution ("low latency") spectrum: a long window resolves bass but reacts late
+    /// (an onset only reaches full strength once it's half a window in), so higher frequencies come from short ones.
+    private final class Tier {
+        let n: Int
+        let fft: vDSP.FFT<DSPSplitComplex>
+        let window: [Float]
+        var windowed: [Float], re: [Float], im: [Float], sq: [Float], amp: [Float]
+        /// Power summed over the overlapping segments, and the smoothed (fast-attack, slow-release) amplitude.
+        var power: [Float], env: [Float]
+        init(_ n: Int) {
+            self.n = n
+            fft = vDSP.FFT(log2n: vDSP_Length(log2(Double(n))), radix: .radix2, ofType: DSPSplitComplex.self)!
+            window = vDSP.window(ofType: Float.self, usingSequence: .hanningDenormalized, count: n, isHalfWindow: false)
+            windowed = .init(repeating: 0, count: n)
+            re = .init(repeating: 0, count: n / 2); im = re; sq = re; amp = re; power = re; env = re
+        }
+
+        /// Power spectrum of the n samples ending at `end` (exclusive), added into `power`.
+        func accumulate(_ mono: (Int) -> Float, end: Int) {
+            let off = end - n
+            for i in 0..<n { windowed[i] = mono(off + i) * window[i] }
+            let h = n / 2
+            re.withUnsafeMutableBufferPointer { rp in
+                im.withUnsafeMutableBufferPointer { ip in
+                    var split = DSPSplitComplex(realp: rp.baseAddress!, imagp: ip.baseAddress!)
+                    windowed.withUnsafeBufferPointer { wp in
+                        wp.baseAddress!.withMemoryRebound(to: DSPComplex.self, capacity: h) { cp in
+                            vDSP_ctoz(cp, 2, &split, 1, vDSP_Length(h))
+                        }
+                    }
+                    fft.forward(input: split, output: &split)
+                    vDSP.squareMagnitudes(split, result: &sq)
+                }
+            }
+            vDSP.add(power, sq, result: &power)
+        }
+    }
+    private let tiers = [Tier(2048), Tier(4096)]
+    /// Below this many bins per octave a tier is too coarse; it fades in over the two octaves above that point.
+    private static let tierBinsPerOctave: Double = 16
+    var lowLatency = true
+    /// Envelope on the short-window bins (seconds). Measured on music: 4× less flicker than raw, snare still ~25 ms.
+    private static let tierRise = 0.012
+    private static let tierFall = 0.12
 
     // Band mapping cache
     private struct MapKey: Equatable { var count: Int; var fMin: Double; var fMax: Double; var sr: Double }
@@ -113,9 +167,25 @@ final class Analyzer {
         let written = ring.totalWritten
         if written != lastWritten { lastDataTime = now; lastWritten = written }
 
+        let dt = lastUpdate > 0 ? min(0.1, now - lastUpdate) : 0
+        lastUpdate = now
+        ioBurst = ring.burst
+        let margin = ioBurst * 1.25 + sampleRate * 0.004
+        let target = Double(written) - margin
+        if playhead < 0 || abs(target - playhead) > sampleRate * 0.25 {
+            playhead = target
+        } else {
+            playhead += dt * sampleRate
+            playhead += (target - playhead) * (1 - exp(-dt / 0.35))
+        }
+        playhead = min(playhead, Double(written))
+        if Self.trace { print("TRACE written=\(written) readEnd=\(Int64(playhead)) dt=\(dt) burst=\(ioBurst) bufMs=\((Double(written) - playhead) / sampleRate * 1000) sr=\(sampleRate)") }
+        readEnd = max(0, Int64(playhead))
+        bufferMs = (Double(written) - playhead) / sampleRate * 1000
+
         snapL.withUnsafeMutableBufferPointer { l in
             snapR.withUnsafeMutableBufferPointer { r in
-                ring.copyLatest(count: snapSize, l: l.baseAddress!, r: r.baseAddress!)
+                ring.copy(endingAt: readEnd, count: snapSize, l: l.baseAddress!, r: r.baseAddress!)
             }
         }
 
@@ -145,9 +215,54 @@ final class Analyzer {
         sq[0] = 0
         vForce.sqrt(sq, result: &amp)
         vDSP.multiply(1 / Float(half), amp, result: &amp)
+        if lowLatency { blendTiers(dt: dt) }
+        if Self.trace { print("LEVEL readEnd=\(readEnd) snare=\(levelRaw(1500, 6000))") }
         dominantHz = Double(vDSP.indexOfMaximum(amp).0) * sampleRate / Double(fftSize)
 
         processColumns()
+    }
+
+    /// Runs the short FFTs on the newest samples and crossfades them into `amp` (same amplitude scale: a sine of
+    /// amplitude A reads A/2 at any FFT size). Each tier takes over across one octave, once its bins are fine enough.
+    private func blendTiers(dt: Double) {
+        let mono: (Int) -> Float = { self.snapL[$0] * 0.5 + self.snapR[$0] * 0.5 }
+        let binHz = sampleRate / Double(fftSize)
+        // largest tier first, so the shortest window ends up on top at high frequencies
+        for t in tiers.reversed() where t.n < fftSize {
+            // Welch: average the newest window with one half a window earlier. Halves the estimate's noise for
+            // ~n/4 samples of extra delay (~10 ms at 2048).
+            let h = t.n / 2
+            vDSP.fill(&t.power, with: 0)
+            t.accumulate(mono, end: snapSize)
+            t.accumulate(mono, end: snapSize - h)
+            t.power[0] = 0
+            vDSP.multiply(0.5, t.power, result: &t.power)
+            vForce.sqrt(t.power, result: &t.amp)
+            vDSP.multiply(1 / Float(h), t.amp, result: &t.amp)
+            // ~12 ms rise, ~120 ms fall: onsets stay sharp, but single-frame noise spikes and the up/down
+            // flicker of a short window are ironed out.
+            let rise = Float(exp(-dt / Self.tierRise)), fall = Float(exp(-dt / Self.tierFall))
+            for k in 0..<h {
+                let v = t.amp[k], e = t.env[k]
+                let c = v >= e ? rise : fall
+                t.env[k] = e * c + v * (1 - c)
+            }
+
+            let tBin = sampleRate / Double(t.n)
+            let start = tBin * Self.tierBinsPerOctave   // an octave at f spans f / tBin bins
+            let i0 = max(1, Int(start / binHz))
+            let half = fftSize / 2
+            guard i0 < half else { continue }
+            for i in i0..<half {
+                let f = Double(i) * binHz
+                let w = Float(min(1, log2(f / start) / 2))                 // 0 → 1 over two octaves, so no visible seam
+                let c = Float(f / tBin)
+                let k = min(Int(c), h - 2)
+                let fr = c - Float(k)
+                let v = t.env[k] * (1 - fr) + t.env[k + 1] * fr
+                amp[i] = amp[i] * (1 - w) + v * w
+            }
+        }
     }
 
     // MARK: - Spectrum queries
@@ -190,6 +305,13 @@ final class Analyzer {
         let floorDB = Float(s.floorDB)
         let db = 20 * log10f(m + 1e-9)
         return min(1.5, max(0, (db - floorDB) / -floorDB) * Float(s.gain))
+    }
+
+    private func levelRaw(_ fLo: Double, _ fHi: Double) -> Float {
+        let binHz = sampleRate / Double(fftSize)
+        var m: Float = 0
+        for i in max(1, Int(fLo / binHz))..<min(amp.count, Int(fHi / binHz)) { m = max(m, amp[i]) }
+        return m
     }
 
     /// RMS of the most recent `count` frames (mono).
@@ -262,7 +384,7 @@ final class Analyzer {
     }
 
     private func processColumns() {
-        let written = ring.totalWritten
+        let written = readEnd   // consume only up to the smoothed playhead
         if consumed < 0 || written - consumed > Int64(sampleRate) {
             consumed = max(0, written - Int64(Self.chunk))
         }

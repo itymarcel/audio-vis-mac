@@ -15,7 +15,7 @@ final class HaloViz: Visualizer {
 
         let c = rc.center
         let r0 = rc.minDim * 0.2 * Float(s.zoom) * (1 + 0.15 * bass + 0.1 * rc.beat)
-        let len = rc.minDim * 0.26 * Float(s.zoom)
+        let len = rc.minDim * 0.26 * Float(s.zoom * s.reach)
         let slots = Float(s.mirror ? 2 * n : n)
         let lw = min(40, max(0.5, 2 * .pi * r0 / slots * 0.55 * Float(s.size)))
         let dash: Float = s.segmented ? max(3, len / 22) : 0

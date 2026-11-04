@@ -12,7 +12,7 @@ final class VectorViz: Visualizer {
 
         let count = min(max(Int(s.vectorMs * 0.001 * a.sampleRate), 16), a.snapSize)
         let start = a.snapSize - count
-        let scale = rc.minDim * 0.38 * Float(s.gain * s.zoom)
+        let scale = rc.minDim * 0.38 * Float(s.gain * s.zoom * s.reach)
         let cr = Float(cos(rot)), sr = Float(sin(rot))
         let L = a.snapL, R = a.snapR
         let lw = rc.unit

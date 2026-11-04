@@ -25,7 +25,8 @@ struct ContentView: View {
 
             if store.s.showFPS {
                 TimelineView(.periodic(from: .now, by: 0.5)) { _ in
-                    Text(String(format: "%.0f fps", engine.fps))
+                    Text(String(format: "%.0f fps · audio %.0f-frame bursts · %.0f ms buffer",
+                                engine.fps, engine.analyzer.ioBurst, engine.analyzer.bufferMs))
                         .font(.system(size: 10).monospacedDigit())
                         .foregroundStyle(.secondary)
                         .padding(.horizontal, 6).padding(.vertical, 2)
@@ -74,7 +75,7 @@ struct ContentView: View {
         w.isOpaque = false
         w.backgroundColor = .clear
         w.titlebarAppearsTransparent = true
-        w.isMovableByWindowBackground = true
+        w.isMovableByWindowBackground = false   // dragging the view orbits the camera; ⌘-drag moves the window
         w.collectionBehavior.insert(.fullScreenPrimary)
         w.level = store.s.alwaysOnTop ? .floating : .normal
     }
@@ -102,8 +103,9 @@ struct MetalVizView: NSViewRepresentable {
 
     func makeNSView(context: Context) -> MTKView {
         let v = DraggableMTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
+        v.camera = app.camera
         v.colorPixelFormat = .bgra8Unorm
-        v.framebufferOnly = true
+        v.framebufferOnly = !DebugSnapshot.enabled
         v.preferredFramesPerSecond = 120
         v.clearColor = MTLClearColorMake(0, 0, 0, 0)
         v.layer?.isOpaque = false
@@ -114,9 +116,57 @@ struct MetalVizView: NSViewRepresentable {
     func updateNSView(_ nsView: MTKView, context: Context) {}
 }
 
+/// Metal view with in-window camera controls:
+/// drag = orbit, right-drag / ⌥-drag / ⇧-drag / two-finger scroll = pan, mouse wheel / pinch = zoom,
+/// double-click = reset, ⌘-drag = move the window.
 final class DraggableMTKView: MTKView {
-    override var mouseDownCanMoveWindow: Bool { true }
+    var camera: Camera?
+    private enum Drag { case none, orbit, pan }
+    private var drag = Drag.none
+
+    override var mouseDownCanMoveWindow: Bool { false }
     override var isOpaque: Bool { false }
+    override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with e: NSEvent) {
+        if e.modifierFlags.contains(.command) { window?.performDrag(with: e); drag = .none; return }
+        if e.clickCount == 2 { camera?.reset(); drag = .none; return }
+        drag = e.modifierFlags.contains(.option) || e.modifierFlags.contains(.shift) ? .pan : .orbit
+        NSCursor.closedHand.push()
+    }
+    override func mouseDragged(with e: NSEvent) {
+        switch drag {
+        case .orbit: camera?.rotate(dx: Float(e.deltaX), dy: Float(e.deltaY))
+        case .pan: camera?.pan(dx: Float(e.deltaX), dy: Float(e.deltaY))
+        case .none: break
+        }
+    }
+    override func mouseUp(with e: NSEvent) {
+        if drag != .none { NSCursor.pop() }
+        drag = .none
+    }
+    override func rightMouseDragged(with e: NSEvent) { camera?.pan(dx: Float(e.deltaX), dy: Float(e.deltaY)) }
+    override func otherMouseDragged(with e: NSEvent) { camera?.pan(dx: Float(e.deltaX), dy: Float(e.deltaY)) }
+
+    override func scrollWheel(with e: NSEvent) {
+        if e.hasPreciseScrollingDeltas && !e.modifierFlags.contains(.command) {
+            // Trackpad: two-finger scroll pans (⌘ + scroll zooms)
+            camera?.pan(dx: Float(e.scrollingDeltaX), dy: Float(e.scrollingDeltaY))
+        } else {
+            let dy = e.hasPreciseScrollingDeltas ? e.scrollingDeltaY * 0.01 : e.scrollingDeltaY * 0.1
+            camera?.zoom(by: Float(exp(dy)), around: cursorOffset(e))
+        }
+    }
+    override func magnify(with e: NSEvent) {
+        camera?.zoom(by: Float(1 + e.magnification), around: cursorOffset(e))
+    }
+
+    /// Cursor position relative to the view centre, in points, y down.
+    private func cursorOffset(_ e: NSEvent) -> SIMD2<Float> {
+        let p = convert(e.locationInWindow, from: nil)
+        return SIMD2(Float(p.x - bounds.midX), Float(bounds.midY - p.y))
+    }
 }
 
 /// Small native toolbar that fades out when the mouse is idle.
@@ -132,6 +182,10 @@ struct HUD: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
+            Button { app.camera.reset() } label: {
+                Image(systemName: "arrow.counterclockwise").frame(width: 14)
+            }
+            .help("Reset view (R). Drag to rotate, right/⌥-drag or two-finger scroll to pan, wheel or pinch to zoom, double-click to reset, ⌘-drag to move the window.")
             Button { app.frozen.toggle() } label: {
                 Image(systemName: app.frozen ? "play.fill" : "pause.fill").frame(width: 14)
             }

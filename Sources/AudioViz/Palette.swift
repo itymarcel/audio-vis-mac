@@ -98,18 +98,37 @@ struct Palette {
     }
 }
 
-/// Fast attack, configurable release, frame-rate independent.
+/// The one smoothing rule used everywhere: rises land within ~one frame regardless of the Smoothing setting,
+/// falls glide back with a time constant set by the slider. Frame-rate independent.
+enum Envelope {
+    /// Rise time constant (s). Short enough to look instant, long enough to drop single-sample spikes.
+    static let riseTau = 0.004
+
+    /// Fall time constant (s) for a Smoothing slider value: the value kept per 60 fps frame.
+    static func fallTau(_ smoothing: Double) -> Double {
+        let s = min(max(smoothing, 0.001), 0.98)
+        return -1 / (60 * log(s))
+    }
+
+    /// Per-frame keep-factors (rise, fall): next = old × k + new × (1 − k).
+    static func coeffs(smoothing: Double, dt: Double) -> (rise: Float, fall: Float) {
+        (Float(exp(-dt / riseTau)), Float(exp(-dt / fallTau(smoothing))))
+    }
+
+    @inline(__always) static func step(_ old: Float, _ new: Float, _ k: (rise: Float, fall: Float)) -> Float {
+        let c = new > old ? k.rise : k.fall
+        return old * c + new * (1 - c)
+    }
+}
+
 struct Smoother {
     private(set) var v: [Float] = []
 
     mutating func step(_ x: [Float], smoothing: Double, dt: Double, frozen: Bool) -> [Float] {
         if v.count != x.count { v = x; return v }
         if frozen { return v }
-        let release = Float(pow(min(smoothing, 0.98), dt * 60)), attack = release * 0.35
-        for i in x.indices {
-            let k = x[i] > v[i] ? attack : release
-            v[i] = v[i] * k + x[i] * (1 - k)
-        }
+        let k = Envelope.coeffs(smoothing: smoothing, dt: dt)
+        for i in x.indices { v[i] = Envelope.step(v[i], x[i], k) }
         return v
     }
 }
@@ -128,6 +147,8 @@ struct RenderContext {
     let ink: SIMD3<Float>
     /// Beat pulse (0…1, decays after each detected beat) × the Beat setting.
     let beat: Float
+    /// User camera for this mode (3D visualizers apply the rotation themselves).
+    var camera = CameraState()
 
     var center: SIMD2<Float> { size * 0.5 }
     var minDim: Float { min(size.x, size.y) }

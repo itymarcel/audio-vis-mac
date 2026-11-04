@@ -32,16 +32,24 @@ struct VizCommands: Commands {
             ForEach(Array(VizMode.allCases.enumerated()), id: \.element) { i, mode in
                 Button(mode.title) { store.s.mode = mode }
                     .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: [])
+                    .disabled(app.textEditing)
             }
             Divider()
             Button(app.showSettings ? "Hide Settings" : "Show Settings") { app.showSettings.toggle() }
                 .keyboardShortcut("s", modifiers: [])
+                .disabled(app.textEditing)
             Button(app.frozen ? "Unfreeze" : "Freeze Frame") { app.frozen.toggle() }
                 .keyboardShortcut(.space, modifiers: [])
+                .disabled(app.textEditing)
+            Button("Reset View") { app.camera.reset() }
+                .keyboardShortcut("r", modifiers: [])
+                .disabled(app.textEditing)
             Button("Toggle Full Screen") { app.window?.toggleFullScreen(nil) }
                 .keyboardShortcut("f", modifiers: [])
+                .disabled(app.textEditing)
             Toggle("Always on Top", isOn: $store.s.alwaysOnTop)
                 .keyboardShortcut("t", modifiers: [])
+                .disabled(app.textEditing)
         }
     }
 }

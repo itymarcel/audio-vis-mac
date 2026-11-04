@@ -12,7 +12,13 @@ struct Seg {
     var pad: Float = 0
 }
 
-struct GPUUniforms { var viewPx: SIMD2<Float>; var pxScale: Float; var time: Float }
+struct GPUUniforms {
+    var viewPx: SIMD2<Float>; var pxScale: Float; var time: Float
+    /// Camera: rotation rows for tilting the 2D scene plane, then pan (points) and zoom about the window centre.
+    var cam0 = SIMD4<Float>(1, 0, 0, 0), cam1 = SIMD4<Float>(0, 1, 0, 0), cam2 = SIMD4<Float>(0, 0, 1, 0)
+    var center = SIMD2<Float>(); var pan = SIMD2<Float>()
+    var zoom: Float = 1; var persp: Float = 1000; var pad0: Float = 0; var pad1: Float = 0
+}
 
 struct SphereUniforms {
     var rot0 = SIMD4<Float>(), rot1 = SIMD4<Float>(), rot2 = SIMD4<Float>()

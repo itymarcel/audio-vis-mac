@@ -8,6 +8,9 @@ final class AudioRing: @unchecked Sendable {
     private let left: UnsafeMutablePointer<Float>
     private let right: UnsafeMutablePointer<Float>
     private var written: Int64 = 0
+    /// Recent largest IO callback (frames), decaying slowly: how bursty the device delivers audio.
+    private var _burst: Double = 512
+    private var _callbacks: Int64 = 0
     private var _sampleRate: Double = 48_000
     private let lock = OSAllocatedUnfairLock()
 
@@ -33,6 +36,24 @@ final class AudioRing: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; return written
     }
 
+    var burst: Double { lock.lock(); defer { lock.unlock() }; return _burst }
+    var callbacks: Int64 { lock.lock(); defer { lock.unlock() }; return _callbacks }
+
+    /// Copies the `count` frames that end at absolute frame `end` (oldest first); frames not yet written are zero.
+    func copy(endingAt end: Int64, count: Int, l: UnsafeMutablePointer<Float>, r: UnsafeMutablePointer<Float>) {
+        lock.lock()
+        let oldest = written - Int64(capacity)
+        let start = end - Int64(count)
+        for i in 0..<count {
+            let pos = start + Int64(i)
+            if pos < max(0, oldest) || pos >= written { l[i] = 0; r[i] = 0; continue }
+            let idx = Int(pos & mask)
+            l[i] = left[idx]
+            r[i] = right[idx]
+        }
+        lock.unlock()
+    }
+
     /// Accepts either one interleaved buffer or separate (non-interleaved) channel buffers, Float32.
     func write(_ list: UnsafePointer<AudioBufferList>) {
         let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: list))
@@ -50,6 +71,10 @@ final class AudioRing: @unchecked Sendable {
         }
     }
 
+    func writeFrames(l: UnsafePointer<Float>, r: UnsafePointer<Float>, frames: Int) {
+        write(l: l, ls: 1, r: r, rs: 1, frames: frames)
+    }
+
     private func write(l: UnsafePointer<Float>, ls: Int, r: UnsafePointer<Float>, rs: Int, frames: Int) {
         guard frames > 0 else { return }
         lock.lock()
@@ -60,20 +85,8 @@ final class AudioRing: @unchecked Sendable {
             right[idx] = r[i * rs]
         }
         written = base + Int64(frames)
-        lock.unlock()
-    }
-
-    /// Copies the most recent `count` frames (oldest first).
-    func copyLatest(count: Int, l: UnsafeMutablePointer<Float>, r: UnsafeMutablePointer<Float>) {
-        lock.lock()
-        let start = written - Int64(count)
-        for i in 0..<count {
-            let pos = start + Int64(i)
-            if pos < 0 { l[i] = 0; r[i] = 0; continue }
-            let idx = Int(pos & mask)
-            l[i] = left[idx]
-            r[i] = right[idx]
-        }
+        _burst = max(Double(frames), _burst * 0.998)
+        _callbacks += 1
         lock.unlock()
     }
 

@@ -3,7 +3,21 @@ let shaderSource = #"""
 #include <metal_stdlib>
 using namespace metal;
 
-struct Uniforms { float2 viewPx; float pxScale; float time; };
+struct Uniforms {
+    float2 viewPx; float pxScale; float time;
+    float4 cam0; float4 cam1; float4 cam2;
+    float2 center; float2 pan;
+    float zoom; float persp; float pad0; float pad1;
+};
+
+/// Camera transform of a scene point (window points, y down): tilt the scene plane in 3D, perspective, pan, zoom.
+/// Returns the new point (xy) and its local scale (z) for widths.
+static float3 camXf(float2 pt, constant Uniforms& U) {
+    float3 l = float3(pt.x - U.center.x, U.center.y - pt.y, 0.0);
+    float3 r = float3(dot(U.cam0.xyz, l), dot(U.cam1.xyz, l), dot(U.cam2.xyz, l));
+    float k = U.zoom * U.persp / max(U.persp - r.z, 1.0);
+    return float3(U.center + U.pan + float2(r.x, -r.y) * k, k);
+}
 struct Seg { float2 a; float2 b; float4 color; float width; float dash; float cap; float pad; };
 
 struct SphereU {
@@ -16,23 +30,43 @@ struct SphereU {
     float4 w0; float4 w1; float4 spin0; float4 spin1;
 };
 
-// Harmonics layout: (m, n) per mode = sectoral order m around the axis × Chebyshev order n along it.
-constant int2 sphereModes[8] = { int2(0,2), int2(2,1), int2(3,0), int2(2,3), int2(4,2), int2(5,3), int2(6,5), int2(8,6) };
+// Harmonics layout: real spherical harmonics Y(l, m), low bands → low degree l.
+constant int2 sphereModes[8] = { int2(2,0), int2(2,2), int2(3,1), int2(4,3), int2(5,2), int2(6,5), int2(8,4), int2(10,7) };
 
-/// Spectrum-weighted sum of 8 smooth spherical modes. Returns the field and the index of the dominant mode.
+/// Associated Legendre P_l^m(x) (Condon–Shortley sign dropped), by the standard recurrence.
+static float legendreP(int l, int m, float x) {
+    float s = sqrt(max(0.0, 1.0 - x * x));
+    float pmm = 1.0, odd = 1.0;
+    for (int i = 0; i < m; i++) { pmm *= odd * s; odd += 2.0; }
+    if (l == m) return pmm;
+    float pm1 = x * float(2 * m + 1) * pmm;
+    if (l == m + 1) return pm1;
+    float pl = 0.0;
+    for (int ll = m + 2; ll <= l; ll++) {
+        pl = (x * float(2 * ll - 1) * pm1 - float(ll + m - 1) * pmm) / float(ll - m);
+        pmm = pm1; pm1 = pl;
+    }
+    return pl;
+}
+
+/// Scale that gives Y(l, m) = N · P_l^m(cos θ) · cos(m φ) an RMS of 1 over the sphere.
+static float shNorm(int l, int m) {
+    float ratio = 1.0;                                   // (l − m)! / (l + m)!
+    for (int k = l - m + 1; k <= l + m; k++) ratio /= float(k);
+    return m == 0 ? sqrt(float(2 * l + 1)) : sqrt(2.0 * float(2 * l + 1) * ratio);
+}
+
+/// Spectrum-weighted sum of 8 spherical harmonics. Returns the field and the index of the dominant mode.
 static float2 sphereField(float3 p, constant SphereU& S) {
     float w[8] = { S.w0.x, S.w0.y, S.w0.z, S.w0.w, S.w1.x, S.w1.y, S.w1.z, S.w1.w };
     float spin[8] = { S.spin0.x, S.spin0.y, S.spin0.z, S.spin0.w, S.spin1.x, S.spin1.y, S.spin1.z, S.spin1.w };
     float y = clamp(p.y, -1.0, 1.0);
-    float st = sqrt(max(0.0, 1.0 - y * y));
-    float th = acos(y);
     float ph = atan2(p.z, p.x);
     float f = 0.0, best = 0.0, idx = 0.0;
     for (int k = 0; k < 8; k++) {
-        int m = sphereModes[k].x, n = sphereModes[k].y;
-        float sect = m == 0 ? 1.0 : pow(st, float(m)) * cos(float(m) * (ph + spin[k]));
-        float zon = cos(float(n) * th + (m == 0 ? spin[k] : 0.0));
-        float c = w[k] * sect * zon;
+        if (w[k] < 1e-4) continue;
+        int l = sphereModes[k].x, m = sphereModes[k].y;
+        float c = w[k] * shNorm(l, m) * legendreP(l, m, y) * cos(float(m) * (ph + spin[k]));
         f += c;
         if (abs(c) > best) { best = abs(c); idx = float(k); }
     }
@@ -117,8 +151,9 @@ static SegOut makeSeg(float2 aPt, float2 bPt, float widthPt, float4 color, float
                       uint vid, constant Uniforms& U) {
     SegOut o;
     float s = U.pxScale;
-    float2 a = aPt * s, b = bPt * s;
-    float wpx = widthPt * s;
+    float3 ca = camXf(aPt, U), cb = camXf(bPt, U);
+    float2 a = ca.xy * s, b = cb.xy * s;
+    float wpx = widthPt * s * 0.5 * (ca.z + cb.z);
     float hw = max(wpx * 0.5, 0.5);
     float2 d = b - a;
     float len = length(d);
@@ -179,8 +214,8 @@ vertex SegOut sphereVert(uint vid [[vertex_id]], uint iid [[instance_id]],
     if (S.layout == 3) {
         // Harmonics: signed bulges in and out; colour by the dominant mode, brightness by local strength.
         float2 fi = sphereField(p, S);
-        a = min(abs(fi.x) * 1.6, 1.5);
-        disp = max(0.35, 1.0 + fi.x * 0.75);
+        a = min(abs(fi.x) * 2.0, 1.5);
+        disp = max(0.3, 1.0 + fi.x);
         frac = (fi.y + 0.5) / 8.0;
     } else {
         if (S.layout == 1 || S.layout == 2) {
@@ -261,33 +296,36 @@ kernel void pushKernel(device float* hist [[buffer(0)]], const device float* val
 
 // ---------------------------------------------------------------- particles (Cymatics + Flow)
 
-constant int2 chladniModes[8] = { int2(1,2), int2(2,3), int2(1,4), int2(3,4), int2(2,5), int2(4,5), int2(3,7), int2(5,6) };
-
-/// Superposition of 8 square-plate Chladni modes, weighted by the spectrum (low bands → low modes).
-static float chladni(float2 p, constant SimU& U) {
-    float w[8] = { U.w0.x, U.w0.y, U.w0.z, U.w0.w, U.w1.x, U.w1.y, U.w1.z, U.w1.w };
-    float f = 0.0;
-    for (int k = 0; k < 8; k++) {
-        float n = float(chladniModes[k].x), m = float(chladniModes[k].y);
-        f += w[k] * (cos(n * M_PI_F * p.x) * cos(m * M_PI_F * p.y) - cos(m * M_PI_F * p.x) * cos(n * M_PI_F * p.y));
-    }
-    return f;
+/// One square free-plate mode, normalised to [-1, 1]: m = (n, m, sign).
+static float chladniMode(float2 p, float3 m) {
+    float a = M_PI_F * p.x, b = M_PI_F * p.y;
+    return 0.5 * (cos(m.x * a) * cos(m.y * b) + m.z * cos(m.y * a) * cos(m.x * b));
 }
 
-/// Sand on a vibrating plate: shaken where the plate moves, drifting toward the still nodal lines.
+/// Plate displacement: crossfade from the previous mode (w0) to the current one (w1, w1.w = progress).
+static float chladni(float2 p, constant SimU& U) {
+    return mix(chladniMode(p, U.w0.xyz), chladniMode(p, U.w1.xyz), U.w1.w);
+}
+
+/// Sand on a vibrating plate: grains are kicked about in proportion to how much the plate moves under them,
+/// plus a drift down ∇(f²), so they collect on the still nodal lines. Steps scale with the mode's wavelength.
 kernel void cymaticsKernel(device float4* P [[buffer(0)]], constant SimU& U [[buffer(1)]], uint i [[thread_position_in_grid]]) {
     if (i >= U.count) return;
     float2 p = P[i].xy;
-    const float e = 0.002;
+    float kA = length(U.w0.xy), kB = length(U.w1.xy);
+    float ks = M_PI_F * max(mix(kA, kB, U.w1.w), 1.0);                  // spatial angular frequency
+    float e = 0.02 / ks;
     float f = chladni(p, U);
-    float fx = chladni(p + float2(e, 0), U), fy = chladni(p + float2(0, e), U);
-    float2 g = float2(fx * fx - f * f, fy * fy - f * f) / e;          // ∇(f²)
+    float fx = chladni(p + float2(e, 0), U) - chladni(p - float2(e, 0), U);
+    float fy = chladni(p + float2(0, e), U) - chladni(p - float2(0, e), U);
+    float2 g = 2.0 * f * float2(fx, fy) / (2.0 * e);                    // ∇(f²)
     float amp = abs(f);
     float2 jitter = float2(rnd(i, U.frame * 2u), rnd(i, U.frame * 2u + 1u)) - 0.5;
-    float2 v = -g * 0.00025 * U.speed + jitter * amp * (U.shake + U.beat * 2.0) * 0.012;
-    v *= U.dtScale;
+    float2 v = -g / (ks * ks) * 0.05 * U.speed
+             + jitter * (amp + 0.03) * (U.shake + U.beat * 2.5) * 0.12 / ks;
+    v *= U.dtScale * U.p0;                                              // p0 = Reach
     p += v;
-    if (any(p < 0.0) || any(p > 1.0) || rnd(i, U.frame + 777u) < 0.0004) {
+    if (any(p < 0.0) || any(p > 1.0) || rnd(i, U.frame + 777u) < 0.0003) {
         p = float2(rnd(i, U.frame + 11u), rnd(i, U.frame + 23u));
         v = 0.0;
     }
@@ -313,7 +351,7 @@ kernel void flowKernel(device float4* P [[buffer(0)]], const device float* vals 
     v.x /= U.aspect;
     float2 d = p - 0.5;
     v += normalize(d + 1e-5) * U.beat * 0.006;                           // beat burst
-    v *= U.dtScale;
+    v *= U.dtScale * U.p0;                                              // p0 = Reach
     p = fract(p + v + 1.0);
     if (rnd(i, U.frame + 99u) < 0.0015) p = float2(rnd(i, U.frame + 5u), rnd(i, U.frame + 6u));
     P[i] = float4(p, v);
@@ -359,11 +397,29 @@ vertex FSOut fsVert(uint vid [[vertex_id]]) {
     return o;
 }
 
+/// Inverse of camXf: the scene point (window points) seen at screen point `sPt`, found by intersecting the view ray with the tilted plane.
+static float2 camInv(float2 sPt, constant Uniforms& U) {
+    float2 q = (sPt - U.center - U.pan) / U.zoom;
+    q.y = -q.y;
+    float3 c0 = float3(U.cam0.x, U.cam1.x, U.cam2.x), c1 = float3(U.cam0.y, U.cam1.y, U.cam2.y);
+    float P = U.persp;
+    float a = c0.x * P + q.x * c0.z, b = c1.x * P + q.x * c1.z;
+    float c = c0.y * P + q.y * c0.z, d = c1.y * P + q.y * c1.z;
+    float det = a * d - b * c;
+    if (abs(det) < 1e-6) return float2(-1e6);
+    float lx = (q.x * P * d - b * q.y * P) / det;
+    float ly = (a * q.y * P - c * q.x * P) / det;
+    return float2(U.center.x + lx, U.center.y - ly);
+}
+
 fragment float4 spectroFrag(FSOut in [[stage_in]], texture2d<float> hist [[texture(0)]],
-                            texture2d<float> palTex [[texture(1)]], constant SpectroU& P [[buffer(0)]]) {
-    float x = in.uv.x;
+                            texture2d<float> palTex [[texture(1)]], constant SpectroU& P [[buffer(0)]],
+                            constant Uniforms& U [[buffer(1)]]) {
+    float2 uv = camInv(in.pos.xy / U.pxScale, U) / (U.viewPx / U.pxScale);
+    if (any(uv < 0.0) || any(uv > 1.0)) return float4(0.0);
+    float x = uv.x;
     if (P.mirror > 0.5) x = abs(x - 0.5) * 2.0;
-    float rowF = P.head - in.uv.y * (P.rows - 1.0);
+    float rowF = P.head - uv.y * (P.rows - 1.0);
     rowF = rowF - P.rows * floor(rowF / P.rows);
     float v;
     if (P.nearest > 0.5) {
@@ -417,7 +473,8 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
     float2 px = in.pos.xy;
     float2 size = float2(scene.get_width(), scene.get_height());
     float3 c = scene.read(uint2(px)).rgb * C.sceneGain;
-    c += bloom.sample(linClamp, in.uv).rgb * C.glow * 2.2 * C.sceneGain;
+    if (C.glow > 0.0) c += bloom.sample(linClamp, in.uv).rgb * C.glow * 2.2 * C.sceneGain;
+    c = select(c, float3(0.0), isnan(c) || isinf(c));   // never let a bad sample poison the frame
     // Hue-preserving tonemap: compress brightness by the max channel so dense overlaps keep their palette colour
     float m = max(c.r, max(c.g, c.b));
     if (m > 1e-5) c *= (1.0 - exp(-m * 1.3)) / m;

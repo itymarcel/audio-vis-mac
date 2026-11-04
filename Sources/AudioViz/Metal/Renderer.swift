@@ -133,6 +133,19 @@ final class Renderer: NSObject, MTKViewDelegate {
         scenes = [tex(w, h), tex(w, h)]
         bloomA = tex(max(1, w / 4), max(1, h / 4))
         bloomB = tex(max(1, w / 4), max(1, h / 4))
+        // Fresh GPU memory is garbage (often NaN in half floats): clear every target once so nothing stale leaks into
+        // trails, bloom or the composite before it's first written.
+        if let cmd = queue.makeCommandBuffer() {
+            for t in scenes + [bloomA!, bloomB!] {
+                let rp = MTLRenderPassDescriptor()
+                rp.colorAttachments[0].texture = t
+                rp.colorAttachments[0].loadAction = .clear
+                rp.colorAttachments[0].clearColor = MTLClearColorMake(0, 0, 0, 0)
+                rp.colorAttachments[0].storeAction = .store
+                cmd.makeRenderCommandEncoder(descriptor: rp)?.endEncoding()
+            }
+            cmd.commit()
+        }
     }
 
     private func ensurePalette(_ kind: PaletteKind) {
@@ -328,7 +341,10 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     func draw(in view: MTKView) {
         guard view.drawableSize.width > 0, view.drawableSize.height > 0 else { return }
-        if scenes.isEmpty { makeTargets(view.drawableSize) }
+        // Keep targets exactly the drawable size (the size-change callback can lag behind the first frames).
+        if scenes.isEmpty || scenes[0].width != Int(view.drawableSize.width) || scenes[0].height != Int(view.drawableSize.height) {
+            makeTargets(view.drawableSize)
+        }
         _ = semaphore.wait(timeout: .distantFuture)
 
         let s = store.s
@@ -348,7 +364,9 @@ final class Renderer: NSObject, MTKViewDelegate {
 
         // CPU: analysis + primitive building
         builder.reset()
-        let rc = engine.prepare(size: sizePt, settings: s, dt: dt, time: elapsed, frozen: frozen)
+        var rc = engine.prepare(size: sizePt, settings: s, dt: dt, time: elapsed, frozen: frozen)
+        let cam = app.camera.step(s.mode, dt: dt)
+        rc.camera = cam
         engine.visualizer(for: s.mode).build(builder, rc)
         ensurePalette(s.palette)
 
@@ -356,9 +374,21 @@ final class Renderer: NSObject, MTKViewDelegate {
               let bloomA, let bloomB, let paletteTex
         else { semaphore.signal(); return }
         let sem = semaphore
-        cmd.addCompletedHandler { _ in sem.signal() }
+        cmd.addCompletedHandler { cb in
+            if let e = cb.error { NSLog("AudioViz: GPU frame failed: \(e)") }
+            sem.signal()
+        }
 
         var U = GPUUniforms(viewPx: px, pxScale: scale, time: Float(elapsed))
+        U.center = sizePt / 2
+        U.pan = cam.pan
+        U.zoom = cam.zoom
+        U.persp = 2.5 * min(sizePt.x, sizePt.y)
+        if !s.isVolumetric {
+            // 2D modes: tilt the whole scene plane; the sphere applies the orbit to its own geometry instead.
+            let r = cam.rotation.transpose
+            U.cam0 = SIMD4(r[0], 0); U.cam1 = SIMD4(r[1], 0); U.cam2 = SIMD4(r[2], 0)
+        }
         let slot = frameSlot
         frameSlot = (frameSlot + 1) % Renderer.inFlight
 
@@ -377,10 +407,10 @@ final class Renderer: NSObject, MTKViewDelegate {
                 let half = engine.analyzer.fftSize / 2
                 let fMin = Float(max(10, s.minFreq))
                 let fMax = max(fMin * 1.5, Float(min(s.maxFreq, engine.analyzer.sampleRate / 2 - 1)))
-                let release = Float(pow(min(s.smoothing, 0.98), dt * 60))
+                let env = Envelope.coeffs(smoothing: s.smoothing, dt: dt)
                 var B = BandUniforms(fMin: fMin, ratio: fMax / fMin, binHz: Float(engine.analyzer.sampleRate) / Float(engine.analyzer.fftSize),
                                      floorDB: Float(s.floorDB), gain: Float(s.gain), tilt: Float(s.tilt),
-                                     release: release, attack: release * 0.35,
+                                     release: env.fall, attack: env.rise,
                                      count: UInt32(gpuBands), halfBins: UInt32(half), levels: UInt32(levels), frozen: frozen ? 1 : 0)
                 ce.setComputePipelineState(bandKernel)
                 ce.setBuffer(valsBuf, offset: 0, index: 0)
@@ -443,6 +473,7 @@ final class Renderer: NSObject, MTKViewDelegate {
                 enc.setFragmentTexture(tex, index: 0)
                 enc.setFragmentTexture(paletteTex, index: 1)
                 enc.setFragmentBytes(&sd.u, length: MemoryLayout<SpectroUniforms>.stride, index: 0)
+                enc.setFragmentBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             }
             if let buf = upload(builder.lines, into: &lineBufs[slot]) {
@@ -508,7 +539,8 @@ final class Renderer: NSObject, MTKViewDelegate {
             e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             e.endEncoding()
         }
-        if s.glow > 0.01 {
+        let bloomOn = s.glow > 0.01
+        if bloomOn {
             let bw = Float(bloomA.width), bh = Float(bloomA.height)
             let spread = Float(1 + s.glow * 1.5)
             blur(cur, bloomA, SIMD2(spread / bw, 0))
@@ -525,7 +557,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             var C = CompositeUniforms(
                 ink: SIMD4(Float((ink >> 16) & 0xFF) / 255, Float((ink >> 8) & 0xFF) / 255, Float(ink & 0xFF) / 255, 1),
                 bg: SIMD4(Float(s.bgRed), Float(s.bgGreen), Float(s.bgBlue), 1),
-                glow: Float(s.glow) * (1 + 1.5 * rc.beat), scan: Float(s.scanlines), grain: Float(s.grain), vignette: Float(s.vignette),
+                glow: bloomOn ? Float(s.glow) * (1 + 1.5 * rc.beat) : 0, scan: Float(s.scanlines), grain: Float(s.grain), vignette: Float(s.vignette),
                 flicker: Float(s.flicker), bandY: Float((elapsed * 0.06).truncatingRemainder(dividingBy: 1.4) - 0.2),
                 bgOpacity: Float(s.bgOpacity),
                 sceneGain: 1,
@@ -538,6 +570,7 @@ final class Renderer: NSObject, MTKViewDelegate {
             enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
             enc.endEncoding()
         }
+        if DebugSnapshot.enabled { DebugSnapshot.capture(drawable.texture, frame: frame, cmd: cmd, device: device) }
         cmd.present(drawable)
         cmd.commit()
     }
