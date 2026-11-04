@@ -1,4 +1,5 @@
 import AppKit
+import MetalKit
 import SwiftUI
 
 struct ContentView: View {
@@ -12,12 +13,8 @@ struct ContentView: View {
 
     var body: some View {
         ZStack(alignment: .top) {
-            TimelineView(.animation) { timeline in
-                Canvas { ctx, size in
-                    engine.render(&ctx, size: size, date: timeline.date, settings: store.s, frozen: app.frozen)
-                }
-            }
-            .ignoresSafeArea()
+            MetalVizView(store: store, app: app, engine: engine)
+                .ignoresSafeArea()
 
             if hudVisible || hudHovered {
                 HUD(store: store, app: app)
@@ -26,16 +23,29 @@ struct ContentView: View {
                     .transition(.opacity)
             }
 
+            if store.s.showFPS {
+                TimelineView(.periodic(from: .now, by: 0.5)) { _ in
+                    Text(String(format: "%.0f fps", engine.fps))
+                        .font(.system(size: 10).monospacedDigit())
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6).padding(.vertical, 2)
+                        .background(.regularMaterial, in: Capsule())
+                }
+                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottomLeading)
+                .padding(10)
+                .allowsHitTesting(false)
+            }
+
             if let status = app.status {
                 VStack {
                     Spacer()
                     Text(status)
-                        .font(.callout)
-                        .multilineTextAlignment(.center)
-                        .foregroundStyle(.white.opacity(0.75))
-                        .padding(.horizontal, 14).padding(.vertical, 8)
-                        .background(.black.opacity(0.45), in: RoundedRectangle(cornerRadius: 10))
-                        .padding(20)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: 460)
+                        .padding(.horizontal, 10).padding(.vertical, 6)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 8))
+                        .padding(.bottom, 56).padding(.horizontal, 30)
                 }
                 .allowsHitTesting(false)
             }
@@ -49,7 +59,7 @@ struct ContentView: View {
         }
         .inspector(isPresented: $app.showSettings) {
             SettingsPanel(store: store, app: app)
-                .inspectorColumnWidth(min: 270, ideal: 310, max: 420)
+                .inspectorColumnWidth(min: 230, ideal: 260, max: 360)
         }
         .onChange(of: store.s.alwaysOnTop) { _, onTop in
             app.window?.level = onTop ? .floating : .normal
@@ -81,36 +91,59 @@ struct ContentView: View {
     }
 }
 
-/// Floating mode switcher that fades out when the mouse is idle.
+/// Hosts the Metal view; the renderer pulls settings each frame (no SwiftUI redraws involved).
+struct MetalVizView: NSViewRepresentable {
+    let store: SettingsStore
+    let app: AppState
+    let engine: VizEngine
+
+    final class Coordinator { var renderer: Renderer? }
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> MTKView {
+        let v = DraggableMTKView(frame: .zero, device: MTLCreateSystemDefaultDevice())
+        v.colorPixelFormat = .bgra8Unorm
+        v.framebufferOnly = true
+        v.preferredFramesPerSecond = 120
+        v.clearColor = MTLClearColorMake(0, 0, 0, 0)
+        v.layer?.isOpaque = false
+        context.coordinator.renderer = Renderer(view: v, store: store, app: app, engine: engine)
+        return v
+    }
+
+    func updateNSView(_ nsView: MTKView, context: Context) {}
+}
+
+final class DraggableMTKView: MTKView {
+    override var mouseDownCanMoveWindow: Bool { true }
+    override var isOpaque: Bool { false }
+}
+
+/// Small native toolbar that fades out when the mouse is idle.
 struct HUD: View {
     @Bindable var store: SettingsStore
     @Bindable var app: AppState
 
     var body: some View {
-        HStack(spacing: 2) {
-            ForEach(Array(VizMode.allCases.enumerated()), id: \.element) { i, mode in
-                Button { store.s.mode = mode } label: {
-                    Image(systemName: mode.symbol)
-                        .font(.system(size: 14, weight: .medium))
-                        .frame(width: 34, height: 28)
-                        .background(store.s.mode == mode ? Color.white.opacity(0.18) : .clear, in: RoundedRectangle(cornerRadius: 7))
-                }
-                .buttonStyle(.plain)
-                .help("\(mode.title)  (\(i + 1))")
+        HStack(spacing: 6) {
+            Picker("Mode", selection: $store.s.mode) {
+                ForEach(VizMode.allCases) { m in Image(systemName: m.symbol).help(m.title).tag(m) }
             }
-            Divider().frame(height: 18).padding(.horizontal, 4)
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
             Button { app.frozen.toggle() } label: {
-                Image(systemName: app.frozen ? "play.fill" : "pause.fill").frame(width: 30, height: 28)
+                Image(systemName: app.frozen ? "play.fill" : "pause.fill").frame(width: 14)
             }
-            .buttonStyle(.plain).help("Freeze frame (Space)")
+            .help("Freeze (Space)")
             Button { app.showSettings.toggle() } label: {
-                Image(systemName: "slider.horizontal.3").frame(width: 30, height: 28)
+                Image(systemName: "slider.horizontal.3").frame(width: 14)
             }
-            .buttonStyle(.plain).help("Settings (S)")
+            .help("Settings (S)")
         }
-        .foregroundStyle(.white.opacity(0.9))
-        .padding(.horizontal, 6).padding(.vertical, 4)
-        .background(.ultraThinMaterial, in: Capsule())
-        .environment(\.colorScheme, .dark)
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .padding(.horizontal, 8).padding(.vertical, 4)
+        .background(.regularMaterial, in: Capsule())
     }
 }

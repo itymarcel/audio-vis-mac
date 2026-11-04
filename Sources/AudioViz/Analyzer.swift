@@ -5,8 +5,8 @@ import Foundation
 /// log-spaced band extraction, and a rolling history of waveform "columns".
 final class Analyzer {
     let ring: AudioRing
-    let fftSize = 8192
-    let snapSize = 16384
+    private(set) var fftSize = 8192
+    let snapSize = 32768
 
     private(set) var snapL: [Float]
     private(set) var snapR: [Float]
@@ -15,10 +15,12 @@ final class Analyzer {
     private(set) var sampleRate: Double = 48_000
     private(set) var lastSoundTime: Double = 0
     private(set) var lastDataTime: Double = 0
+    private(set) var peakLevel: Float = 0
+    private(set) var dominantHz: Double = 0
     private var lastWritten: Int64 = 0
 
-    private let fft: vDSP.FFT<DSPSplitComplex>
-    private let window: [Float]
+    private var fft: vDSP.FFT<DSPSplitComplex>
+    private var window: [Float]
     private var windowed: [Float]
     private var re: [Float]
     private var im: [Float]
@@ -70,7 +72,43 @@ final class Analyzer {
 
     // MARK: - Per-frame update
 
-    func update(now: Double) {
+    /// Changes the analysis FFT size (power of two, 1024…32768).
+    func configure(fftSize n: Int) {
+        guard n != fftSize, n >= 1024, n <= snapSize, n & (n - 1) == 0 else { return }
+        fftSize = n
+        fft = vDSP.FFT(log2n: vDSP_Length(log2(Double(n))), radix: .radix2, ofType: DSPSplitComplex.self)!
+        window = vDSP.window(ofType: Float.self, usingSequence: .hanningDenormalized, count: n, isHalfWindow: false)
+        windowed = .init(repeating: 0, count: n)
+        re = .init(repeating: 0, count: n / 2)
+        im = .init(repeating: 0, count: n / 2)
+        sq = .init(repeating: 0, count: n / 2)
+        amp = .init(repeating: 0, count: n / 2)
+        mapKey = nil
+    }
+
+    /// Writes a max-pyramid of the amplitude spectrum (level 0 = raw bins) for the GPU. Returns level count.
+    func buildPyramid(into p: UnsafeMutablePointer<Float>, capacity: Int, offsets: inout [UInt32]) -> Int {
+        let half = fftSize / 2
+        guard half * 2 <= capacity else { return 0 }
+        amp.withUnsafeBufferPointer { p.update(from: $0.baseAddress!, count: half) }
+        var off = 0, size = half, level = 0
+        offsets[0] = 0
+        while size > 1 && level < 15 {
+            let next = (size + 1) / 2
+            let dst = off + size
+            for i in 0..<next {
+                let a = p[off + 2 * i]
+                let b = 2 * i + 1 < size ? p[off + 2 * i + 1] : a
+                p[dst + i] = max(a, b)
+            }
+            off = dst; size = next; level += 1
+            offsets[level] = UInt32(off)
+        }
+        return level + 1
+    }
+
+    func update(now: Double, fftSize n: Int) {
+        configure(fftSize: n)
         sampleRate = ring.sampleRate
         let written = ring.totalWritten
         if written != lastWritten { lastDataTime = now; lastWritten = written }
@@ -89,6 +127,7 @@ final class Analyzer {
             peak = max(peak, abs(m))
         }
         if peak > 1e-4 { lastSoundTime = now }
+        peakLevel = peak
 
         let half = fftSize / 2
         re.withUnsafeMutableBufferPointer { rp in
@@ -106,6 +145,7 @@ final class Analyzer {
         sq[0] = 0
         vForce.sqrt(sq, result: &amp)
         vDSP.multiply(1 / Float(half), amp, result: &amp)
+        dominantHz = Double(vDSP.indexOfMaximum(amp).0) * sampleRate / Double(fftSize)
 
         processColumns()
     }
@@ -197,6 +237,30 @@ final class Analyzer {
         return out[...]
     }
 
+    // Beat detection on bass energy per chunk (~5 ms resolution)
+    private var beatFast: Float = 0
+    private var beatSlow: Float = 0
+    private var sampleClock: Int64 = 0
+    private var lastBeatSample: Int64 = -1_000_000
+    private(set) var beatCount = 0
+
+    private func detectBeat(lowRMS: Float) {
+        let chunkDur = Float(Self.chunk) / Float(sampleRate)
+        beatFast += (lowRMS - beatFast) * (1 - exp(-chunkDur / 0.025))
+        beatSlow += (lowRMS - beatSlow) * (1 - exp(-chunkDur / 1.2))
+        sampleClock += Int64(Self.chunk)
+        if beatFast > beatSlow * 1.35 + 0.003 && sampleClock - lastBeatSample > Int64(sampleRate * 0.22) {
+            lastBeatSample = sampleClock
+            beatCount += 1
+        }
+    }
+
+    /// 1 right on a detected beat, decaying to 0 over ~150 ms.
+    var beatPulse: Float {
+        let age = Double(sampleClock - lastBeatSample) / sampleRate
+        return age < 0 ? 0 : Float(exp(-age / 0.15))
+    }
+
     private func processColumns() {
         let written = ring.totalWritten
         if consumed < 0 || written - consumed > Int64(sampleRate) {
@@ -232,6 +296,7 @@ final class Analyzer {
                     acc.rms = sqrt(accSq / Float(chunk))
                     let rl = sqrt(eLow), rm = sqrt(eMid), rh = sqrt(eHigh) * 2.5
                     acc.bright = min(1, (0.5 * rm + rh) / (rl + rm + rh + 1e-9))
+                    detectBeat(lowRMS: sqrt(eLow / Float(chunk)))
                     cols[colCount % colCap] = acc
                     colCount += 1
                     accN = 0; accSq = 0; eLow = 0; eMid = 0; eHigh = 0

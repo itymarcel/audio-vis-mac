@@ -1,0 +1,141 @@
+import simd
+
+// Layouts must match the structs in Shaders.swift.
+
+struct Seg {
+    var a: SIMD2<Float>
+    var b: SIMD2<Float>
+    var color: SIMD4<Float>
+    var width: Float
+    var dash: Float = 0
+    var cap: Float = 0     // 0 = round, 1 = butt / square
+    var pad: Float = 0
+}
+
+struct GPUUniforms { var viewPx: SIMD2<Float>; var pxScale: Float; var time: Float }
+
+struct SphereUniforms {
+    var rot0 = SIMD4<Float>(), rot1 = SIMD4<Float>(), rot2 = SIMD4<Float>()
+    var center = SIMD2<Float>(); var R: Float = 0; var cam: Float = 3.4
+    var dotR: Float = 1; var dispK: Float = 0.55; var phase: Float = 0; var colorByFreq: Float = 1
+    var lineW: Float = 1; var alphaK: Float = 1; var square: Float = 0; var dash: Float = 0
+    var N: UInt32 = 0; var bandCount: UInt32 = 0; var mirror: UInt32 = 0; var mode: UInt32 = 0
+    var layout: UInt32 = 0; var histBands: UInt32 = 0; var histCols: UInt32 = 0; var head: UInt32 = 0
+    /// Harmonics layout: 8 smoothed spectrum weights (low → high modes) and per-mode spin angles.
+    var w0 = SIMD4<Float>(), w1 = SIMD4<Float>()
+    var spin0 = SIMD4<Float>(), spin1 = SIMD4<Float>()
+}
+
+struct BandUniforms {
+    var fMin: Float, ratio: Float, binHz: Float, floorDB: Float
+    var gain: Float, tilt: Float, release: Float, attack: Float
+    var count: UInt32, halfBins: UInt32, levels: UInt32, frozen: UInt32
+}
+
+struct SpectroUniforms {
+    var head: Float = 0, rows: Float = 0, phase: Float = 0, colorByFreq: Float = 1
+    var mirror: Float = 0, nearest: Float = 0, bands: Float = 0, cellPx: Float = 0
+}
+
+struct CompositeUniforms {
+    var ink: SIMD4<Float>
+    var bg: SIMD4<Float>
+    var glow: Float, scan: Float, grain: Float, vignette: Float
+    var flicker: Float, bandY: Float, bgOpacity: Float, sceneGain: Float
+    var cornerR: Float, time: Float, pxScale: Float, flickerRand: Float
+}
+
+struct WarpUniforms { var decay: Float, zoom: Float, rot: Float, swirl: Float, ripple: Float, kaleido: Float, time: Float, aspect: Float }
+
+struct SimUniforms {
+    var w0 = SIMD4<Float>(), w1 = SIMD4<Float>()
+    var shake: Float = 0, speed: Float = 1, dtScale: Float = 1, time: Float = 0
+    var turb: Float = 0, noiseScale: Float = 3, beat: Float = 0, level: Float = 0
+    var count: UInt32 = 0, frame: UInt32 = 0, bandCount: UInt32 = 0, kind: UInt32 = 0
+    var aspect: Float = 1, p0: Float = 0, p1: Float = 0, p2: Float = 0
+}
+
+struct PartDrawUniforms {
+    var origin = SIMD2<Float>(), extent = SIMD2<Float>()
+    var dotR: Float = 1, alphaK: Float = 1, phase: Float = 0, colorByFreq: Float = 1
+    var square: Float = 0, streak: Float = 0, domT: Float = 0, speedK: Float = 1
+    var kind: UInt32 = 0, count: UInt32 = 0, bandCount: UInt32 = 0, pad: UInt32 = 0
+}
+
+enum ParticleKind: UInt32 { case cymatics = 0, flow = 1 }
+
+struct ParticleDraw {
+    var kind: ParticleKind
+    var count: Int
+    /// GPU spectrum bands needed by the simulation (0 = none)
+    var bandCount: Int
+    var sim: SimUniforms
+    var draw: PartDrawUniforms
+}
+
+struct SphereDraw {
+    var u: SphereUniforms
+    var n: Int
+    var layout: SphereLayout
+    var bandCount: Int
+    var dots: Bool
+    var spikes: Bool
+    var baseDots: Bool
+}
+
+struct SpectroDraw {
+    var bands: Int
+    var newRows: [[Float]]
+    var u: SpectroUniforms
+}
+
+/// Collects one frame's GPU primitives. Points are in window points (top-left origin).
+final class FrameBuilder {
+    /// Additive blend: dots, bars, spokes (overlaps glow brighter).
+    var add: [Seg] = []
+    /// Max blend: polylines and outlines (joints don't double up).
+    var lines: [Seg] = []
+    var sphere: SphereDraw?
+    var spectro: SpectroDraw?
+    var particles: ParticleDraw?
+
+    func reset() {
+        add.removeAll(keepingCapacity: true)
+        lines.removeAll(keepingCapacity: true)
+        sphere = nil
+        spectro = nil
+        particles = nil
+    }
+
+    @inline(__always) func dot(_ p: SIMD2<Float>, _ r: Float, _ c: SIMD4<Float>, square: Bool = false) {
+        add.append(Seg(a: p, b: p, color: c, width: 2 * r, cap: square ? 1 : 0))
+    }
+
+    @inline(__always) func spoke(_ a: SIMD2<Float>, _ b: SIMD2<Float>, _ c: SIMD4<Float>, _ w: Float, dash: Float = 0) {
+        add.append(Seg(a: a, b: b, color: c, width: w, dash: dash, cap: dash > 0 ? 1 : 0))
+    }
+
+    /// Axis-aligned rect drawn as a butt-capped vertical bar; dash gives screen-aligned LED blocks.
+    @inline(__always) func rect(x: Float, y: Float, w: Float, h: Float, _ c: SIMD4<Float>, dash: Float = 0) {
+        add.append(Seg(a: SIMD2(x + w / 2, y), b: SIMD2(x + w / 2, y + h), color: c, width: w, dash: dash, cap: 1))
+    }
+
+    @inline(__always) func line(_ a: SIMD2<Float>, _ b: SIMD2<Float>, _ c: SIMD4<Float>, _ w: Float, dash: Float = 0) {
+        lines.append(Seg(a: a, b: b, color: c, width: w, dash: dash, cap: 0))
+    }
+
+    func polyline(_ pts: [SIMD2<Float>], _ w: Float, dash: Float = 0, color: (Int) -> SIMD4<Float>) {
+        guard pts.count > 1 else { return }
+        for k in 1..<pts.count { line(pts[k - 1], pts[k], color(k), w, dash: dash) }
+    }
+
+    func circle(_ c: SIMD2<Float>, _ r: Float, _ col: SIMD4<Float>, _ w: Float = 1, dash: Float = 0, segments: Int = 160) {
+        var prev = c + SIMD2(r, 0)
+        for i in 1...segments {
+            let th = Float(i) / Float(segments) * 2 * .pi
+            let p = c + SIMD2(cos(th), sin(th)) * r
+            line(prev, p, col, w, dash: dash)
+            prev = p
+        }
+    }
+}

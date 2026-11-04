@@ -1,0 +1,34 @@
+{
+  "permissions": {
+    "defaultMode": "auto",
+    "allow": [
+      "Bash(./build.sh:*)",
+      "Bash(swift build:*)",
+      "Bash(swift package:*)",
+      "Bash(open build/AudioViz.app)",
+      "Bash(pkill -x AudioViz:*)",
+      "Bash(pgrep:*)",
+      "Bash(cd:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(cat:*)",
+      "Bash(head:*)",
+      "Bash(tail:*)",
+      "Bash(sed:*)",
+      "Bash(python3:*)",
+      "Bash(perl:*)",
+      "Bash(mkdir:*)",
+      "Bash(rm:*)",
+      "Bash(mv:*)",
+      "Bash(cp:*)",
+      "Bash(/usr/bin/log show:*)",
+      "Bash(log show:*)",
+      "Bash(sample:*)",
+      "Bash(ps:*)",
+      "Edit(./**)",
+      "Write(./**)",
+      "WebSearch",
+      "WebFetch"
+    ]
+  }
+}

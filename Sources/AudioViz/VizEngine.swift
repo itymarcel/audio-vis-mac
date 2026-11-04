@@ -1,15 +1,17 @@
-import SwiftUI
+import Foundation
+import simd
 
-/// Owns audio capture, analysis and the visualizers; renders one frame per Canvas pass.
+/// Owns audio capture, analysis and the visualizers. The Metal renderer drives it once per frame.
 final class VizEngine {
     let ring = AudioRing()
     lazy var analyzer = Analyzer(ring: ring)
     private var tap: SystemAudioTap?
     private var tapError: String?
     private var statusTimer: Timer?
-    private var lastTime: Double?
-    private var fps: Double = 60
+    private var startTime = Date().timeIntervalSinceReferenceDate
     private var cyclePhase: Float = 0
+    /// Smoothed frame rate, written by the renderer.
+    var fps: Double = 0
 
     private let visualizers: [VizMode: Visualizer] = [
         .sphere: SphereViz(),
@@ -18,10 +20,18 @@ final class VizEngine {
         .vectorscope: VectorViz(),
         .halo: HaloViz(),
         .spectrogram: SpectroViz(),
+        .cymatics: CymaticsViz(),
+        .flow: FlowViz(),
     ]
+
+    var outputName: String { tap?.outputName ?? "" }
+    var tapOK: Bool { tapError == nil }
+
+    func visualizer(for mode: VizMode) -> Visualizer { visualizers[mode]! }
 
     func start(app: AppState) {
         guard tap == nil else { return }
+        startTime = Date().timeIntervalSinceReferenceDate
         let tap = SystemAudioTap(ring: ring)
         tap.onStatus = { [weak self] msg in self?.tapError = msg }
         self.tap = tap
@@ -33,35 +43,25 @@ final class VizEngine {
             var msg: String?
             if let err = self.tapError {
                 msg = "Audio capture failed: \(err). Requires macOS 14.2 or later."
-            } else if !app.frozen && now - self.analyzer.lastSoundTime > 3 {
-                msg = "Waiting for sound… If audio is playing, allow AudioViz under System Settings › Privacy & Security › Screen & System Audio Recording, then relaunch."
+            } else if !app.frozen && now - self.startTime > 3 && CACurrentMediaTimeSafe() - self.analyzer.lastSoundTime > 3 {
+                msg = "No audio signal. If something is playing, allow AudioViz in System Settings › Privacy & Security › Screen & System Audio Recording, then relaunch."
             }
             if app.status != msg { app.status = msg }
         }
     }
 
-    func render(_ g: inout GraphicsContext, size: CGSize, date: Date, settings s: VizSettings, frozen: Bool) {
-        let t = date.timeIntervalSinceReferenceDate
-        let dt = min(max(lastTime.map { t - $0 } ?? 1 / 60, 0), 0.1)
-        lastTime = t
-        if dt > 0 { fps = fps * 0.95 + (1 / dt) * 0.05 }
-
-        if !frozen { analyzer.update(now: t) }
+    func prepare(size: SIMD2<Float>, settings s: VizSettings, dt: Double, time: Double, frozen: Bool) -> RenderContext {
+        if !frozen { analyzer.update(now: CACurrentMediaTimeSafe(), fftSize: Int(s.fftSize)) }
         cyclePhase += Float(dt * s.colorCycle * 0.15)
         if cyclePhase > 2 { cyclePhase -= 2 }
-
-        g.fill(Path(CGRect(origin: .zero, size: size)), with: .color(.black.opacity(s.bgOpacity)))
-
-        let rc = RenderContext(
-            size: size, s: s, time: t, dt: dt, frozen: frozen,
-            analyzer: analyzer, palette: s.palette.palette,
-            phase: Float(s.hueShift) + cyclePhase)
-        var layer = g
-        visualizers[s.mode]?.draw(&layer, rc)
-
-        if s.showFPS {
-            g.draw(Text(String(format: "%.0f fps", fps)).font(.system(size: 11, design: .monospaced)).foregroundColor(.white.opacity(0.6)),
-                   at: CGPoint(x: 12, y: size.height - 12), anchor: .bottomLeading)
-        }
+        let ink = s.palette.ink
+        return RenderContext(
+            size: size, s: s, time: time, dt: dt, frozen: frozen, analyzer: analyzer,
+            palette: s.palette.palette, phase: Float(s.hueShift) + cyclePhase,
+            ink: SIMD3(Float((ink >> 16) & 0xFF) / 255, Float((ink >> 8) & 0xFF) / 255, Float(ink & 0xFF) / 255),
+            beat: analyzer.beatPulse * Float(s.beat))
     }
 }
+
+import QuartzCore
+@inline(__always) func CACurrentMediaTimeSafe() -> Double { CACurrentMediaTime() }

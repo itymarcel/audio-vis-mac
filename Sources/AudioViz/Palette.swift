@@ -2,12 +2,34 @@ import SwiftUI
 import simd
 
 enum PaletteKind: String, Codable, CaseIterable, Identifiable {
+    // retro / sci-fi / solarpunk
+    case phosphor, silo, amber, brass, solarpunk, verdigris, hologram
+    // vivid
     case aurora, neon, fire, ocean, sunset, acid, rainbow, mono
     var id: String { rawValue }
-    var title: String { rawValue.capitalized }
+
+    var title: String {
+        switch self {
+        case .phosphor: "Phosphor P1"
+        case .silo: "Silo Terminal"
+        case .amber: "Amber P3"
+        case .brass: "Brass Tablet"
+        case .solarpunk: "Solarpunk"
+        case .verdigris: "Verdigris"
+        case .hologram: "Hologram"
+        default: rawValue.capitalized
+        }
+    }
 
     var palette: Palette {
         switch self {
+        case .phosphor: Palette([0x03200F, 0x0B5A2E, 0x1FBF6A, 0x7DFFB0, 0xE6FFF0])
+        case .silo: Palette([0x021A1A, 0x0A4F4F, 0x1EA89A, 0x6FF2D8, 0xE0FFF8])
+        case .amber: Palette([0x220E00, 0x6B3200, 0xD97A00, 0xFFB000, 0xFFE9B0])
+        case .brass: Palette([0x1A1004, 0x5A3F12, 0xB08A3E, 0xE8C46A, 0xFFF3CC])
+        case .solarpunk: Palette([0x10301A, 0x2F6B2A, 0x7FB33C, 0xE8C547, 0xFFF1B8])
+        case .verdigris: Palette([0x2A1408, 0x8C4A1E, 0xC07A3A, 0x4FA38A, 0xA8E6CF])
+        case .hologram: Palette([0x0A1A2A, 0x3A6E9E, 0x9CCBF0, 0xF2FAFF])
         case .aurora: Palette([0x0B3D91, 0x00C2A8, 0x7CFFB2, 0xB47CFF, 0xFF5FA2])
         case .neon: Palette([0xFF00C8, 0x8A2BFF, 0x00E5FF, 0x39FF14])
         case .fire: Palette([0x4A0000, 0xC01800, 0xFF6A00, 0xFFC400, 0xFFF6D0])
@@ -18,6 +40,27 @@ enum PaletteKind: String, Codable, CaseIterable, Identifiable {
         case .mono: Palette([0x5A6270, 0xC8D0DC, 0xFFFFFF])
         }
     }
+
+    /// Accent colour matching the palette (used for subtle guide lines and the CRT refresh band).
+    var ink: UInt32 {
+        switch self {
+        case .phosphor: 0x4DFF9A
+        case .silo: 0x5CF2D2
+        case .amber: 0xFFB000
+        case .brass: 0xE8C46A
+        case .solarpunk: 0xC9E36A
+        case .verdigris: 0x7FD6B5
+        case .hologram: 0xA8D8FF
+        case .aurora: 0x7CFFB2
+        case .neon: 0x00E5FF
+        case .fire: 0xFFA040
+        case .ocean: 0x7FE7F2
+        case .sunset: 0xFF9A3C
+        case .acid: 0xE6FF00
+        case .rainbow, .mono: 0xE0E6EE
+        }
+    }
+
 }
 
 struct Palette {
@@ -55,47 +98,14 @@ struct Palette {
     }
 }
 
-/// Groups shapes by quantized (colour, alpha) so thousands of dots become a few dozen draw calls.
-struct Batch {
-    static let tLevels = 64
-    static let aLevels = 16
-    private(set) var paths: [Int: Path] = [:]
-
-    mutating func add(_ t: Float, _ alpha: Float, _ build: (inout Path) -> Void) {
-        let ai = Int(min(max(alpha, 0), 1) * Float(Batch.aLevels - 1) + 0.5)
-        guard ai > 0 else { return }
-        let ti = Int(Palette.pingPong(t) * Float(Batch.tLevels - 1) + 0.5)
-        build(&paths[ti * Batch.aLevels + ai, default: Path()])
-    }
-
-    private func decode(_ k: Int) -> (Float, Double) {
-        (Float(k / Batch.aLevels) / Float(Batch.tLevels - 1), Double(k % Batch.aLevels) / Double(Batch.aLevels - 1))
-    }
-
-    func fill(_ g: inout GraphicsContext, _ p: Palette, alpha: Double = 1) {
-        for (k, path) in paths {
-            let (t, a) = decode(k)
-            g.fill(path, with: .color(p.color(t, a * alpha)))
-        }
-    }
-
-    func stroke(_ g: inout GraphicsContext, _ p: Palette, width: CGFloat, alpha: Double = 1) {
-        let style = StrokeStyle(lineWidth: width, lineCap: .round, lineJoin: .round)
-        for (k, path) in paths {
-            let (t, a) = decode(k)
-            g.stroke(path, with: .color(p.color(t, a * alpha)), style: style)
-        }
-    }
-}
-
-/// Fast attack, configurable release.
+/// Fast attack, configurable release, frame-rate independent.
 struct Smoother {
     private(set) var v: [Float] = []
 
-    mutating func step(_ x: [Float], smoothing: Float, frozen: Bool) -> [Float] {
+    mutating func step(_ x: [Float], smoothing: Double, dt: Double, frozen: Bool) -> [Float] {
         if v.count != x.count { v = x; return v }
         if frozen { return v }
-        let release = min(smoothing, 0.98), attack = release * 0.35
+        let release = Float(pow(min(smoothing, 0.98), dt * 60)), attack = release * 0.35
         for i in x.indices {
             let k = x[i] > v[i] ? attack : release
             v[i] = v[i] * k + x[i] * (1 - k)
@@ -105,7 +115,7 @@ struct Smoother {
 }
 
 struct RenderContext {
-    let size: CGSize
+    let size: SIMD2<Float>
     let s: VizSettings
     let time: Double
     let dt: Double
@@ -114,13 +124,22 @@ struct RenderContext {
     let palette: Palette
     /// Palette offset (hue shift + colour cycling)
     let phase: Float
+    /// Accent colour for guide lines
+    let ink: SIMD3<Float>
+    /// Beat pulse (0…1, decays after each detected beat) × the Beat setting.
+    let beat: Float
 
-    var center: CGPoint { CGPoint(x: size.width / 2, y: size.height / 2) }
-    var minDim: CGFloat { min(size.width, size.height) }
+    var center: SIMD2<Float> { size * 0.5 }
+    var minDim: Float { min(size.x, size.y) }
     /// Base line width / dot size scaled to the window.
-    var unit: CGFloat { max(0.5, CGFloat(s.size) * minDim / 600) }
+    var unit: Float { max(0.5, Float(s.size) * minDim / 600) }
+
+    /// Palette colour; `t` should already include `phase`.
+    @inline(__always) func col(_ t: Float, _ a: Float) -> SIMD4<Float> { SIMD4(palette.rgb(t), a) }
+    @inline(__always) func inkC(_ a: Float) -> SIMD4<Float> { SIMD4(ink, a) }
 }
 
 protocol Visualizer: AnyObject {
-    func draw(_ g: inout GraphicsContext, _ rc: RenderContext)
+    /// Emit GPU primitives for this frame.
+    func build(_ f: FrameBuilder, _ rc: RenderContext)
 }

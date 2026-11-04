@@ -1,5 +1,7 @@
+import AppKit
 import SwiftUI
 
+/// Compact native settings panel.
 struct SettingsPanel: View {
     @Bindable var store: SettingsStore
     @Bindable var app: AppState
@@ -8,30 +10,30 @@ struct SettingsPanel: View {
 
     var body: some View {
         Form {
-            Section {
+            Section("Mode") {
                 Picker("Mode", selection: $store.s.mode) {
                     ForEach(VizMode.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) }
                 }
-                Text(mode.hint).font(.caption).foregroundStyle(.secondary)
+                if mode == .sphere {
+                    Picker("Layout", selection: $store.s.sphereLayout) {
+                        ForEach(SphereLayout.allCases) { Text($0.title).tag($0) }
+                    }
+                    Hint(store.s.sphereLayout.hint)
+                } else {
+                    Hint(mode.hint)
+                }
                 Picker("Style", selection: $store.s.style) {
                     ForEach(DrawStyle.allCases) { Text($0.title).tag($0) }
                 }
                 .pickerStyle(.segmented)
                 .knob(.style, mode)
-                let d = mode.detail
-                SliderRow(title: d.label, value: Binding(
-                    get: { store.s[keyPath: d.keyPath] },
-                    set: { store.s[keyPath: d.keyPath] = $0.rounded(toPlaces: d.range.upperBound > 50 ? 0 : 1) }
-                ), range: d.range, format: d.format)
-            } header: { Text("Mode") }
+                detailRow
+            }
 
             Section("Colour") {
                 Picker("Palette", selection: $store.s.palette) {
                     ForEach(PaletteKind.allCases) { p in
-                        HStack {
-                            PaletteSwatch(palette: p.palette)
-                            Text(p.title)
-                        }.tag(p)
+                        HStack { PaletteSwatch(palette: p.palette); Text(p.title) }.tag(p)
                     }
                 }
                 Picker("Colour by", selection: $store.s.colorBy) {
@@ -39,52 +41,117 @@ struct SettingsPanel: View {
                 }
                 .pickerStyle(.segmented)
                 .knob(.colorBy, mode)
-                SliderRow(title: "Palette offset", value: $store.s.hueShift, range: 0...2, format: "%.2f")
-                SliderRow(title: "Colour cycling", value: $store.s.colorCycle, range: 0...2, format: "%.2f")
+                SliderRow("Offset", $store.s.hueShift, 0...2, "%.2f")
+                SliderRow("Cycling", $store.s.colorCycle, 0...2, "%.2f")
             }
 
             Section("Response") {
-                SliderRow(title: "Gain / sensitivity", value: $store.s.gain, range: 0.2...5, format: "%.2f×")
-                    .knob(.gain, mode)
-                SliderRow(title: "Noise floor", value: $store.s.floorDB, range: -120...(-30), format: "%.0f dB")
-                    .knob(.floor, mode)
-                SliderRow(title: "Treble tilt", value: $store.s.tilt, range: 0...6, format: "%.1f dB/oct")
-                    .knob(.tilt, mode)
-                SliderRow(title: "Smoothing", value: $store.s.smoothing, range: 0...0.97, format: "%.2f")
-                    .knob(.smoothing, mode)
-                SliderRow(title: "Lowest frequency", value: logBinding(\.minFreq), range: log10(20)...log10(1000), format: "") {
-                    hz(store.s.minFreq)
+                Picker("FFT size", selection: $store.s.fftSize) {
+                    ForEach([2048.0, 4096, 8192, 16384, 32768], id: \.self) { Text("\(Int($0))").tag($0) }
                 }
-                .knob(.freqRange, mode)
-                SliderRow(title: "Highest frequency", value: logBinding(\.maxFreq), range: log10(1500)...log10(22000), format: "") {
-                    hz(store.s.maxFreq)
-                }
-                .knob(.freqRange, mode)
+                .help("Bigger = finer frequency detail (good for huge point counts), slower response.")
+                SliderRow("Gain", $store.s.gain, 0.2...5, "%.2f×").knob(.gain, mode)
+                SliderRow("Floor", $store.s.floorDB, -120...(-30), "%.0f dB").knob(.floor, mode)
+                SliderRow("Tilt", $store.s.tilt, 0...6, "%.1f dB").knob(.tilt, mode)
+                SliderRow("Smoothing", $store.s.smoothing, 0...0.97, "%.2f").knob(.smoothing, mode)
+                SliderRow("Low freq", logBinding(\.minFreq), log10(20)...log10(1000)) { hz(store.s.minFreq) }
+                    .knob(.freqRange, mode)
+                SliderRow("High freq", logBinding(\.maxFreq), log10(1500)...log10(22000)) { hz(store.s.maxFreq) }
+                    .knob(.freqRange, mode)
             }
 
-            Section("Shape & Motion") {
-                SliderRow(title: "Size / thickness", value: $store.s.size, range: 0.2...4, format: "%.2f").knob(.size, mode)
-                SliderRow(title: "Glow", value: $store.s.glow, range: 0...1, format: "%.2f").knob(.glow, mode)
-                SliderRow(title: "Persistence (trails)", value: $store.s.persistence, range: 0...1, format: "%.2f").knob(.persistence, mode)
-                SliderRow(title: "Motion (rotation / scroll)", value: $store.s.motion, range: 0...2, format: "%.2f").knob(.motion, mode)
-                SliderRow(title: "Zoom", value: $store.s.zoom, range: 0.3...2.5, format: "%.2f×").knob(.zoom, mode)
-                Toggle("Stereo (split L / R)", isOn: $store.s.stereo).knob(.stereo, mode)
-                Toggle("Mirror / symmetric", isOn: $store.s.mirror).knob(.mirror, mode)
+            Section("Shape & motion") {
+                SliderRow("Size", $store.s.size, 0.2...4, "%.2f").knob(.size, mode)
+                SliderRow("Glow", $store.s.glow, 0...1, "%.2f").knob(.glow, mode)
+                SliderRow("Trails", $store.s.persistence, 0...1, "%.2f").knob(.persistence, mode)
+                SliderRow("Motion", $store.s.motion, 0...2, "%.2f").knob(.motion, mode)
+                SliderRow("Zoom", $store.s.zoom, 0.3...2.5, "%.2f×").knob(.zoom, mode)
+                HStack {
+                    Toggle("Stereo", isOn: $store.s.stereo).knob(.stereo, mode)
+                    Toggle("Mirror", isOn: $store.s.mirror).knob(.mirror, mode)
+                    Toggle("Segmented", isOn: $store.s.segmented).knob(.segmented, mode)
+                }
+            }
+
+            Section("Feedback & beat") {
+                Picker("Warp", selection: $store.s.warpStyle) {
+                    ForEach(WarpStyle.allCases) { Text($0.title).tag($0) }
+                }
+                .knob(.persistence, mode)
+                SliderRow("Warp amt", $store.s.warp, 0...1, "%.2f").knob(.persistence, mode)
+                SliderRow("Beat", $store.s.beat, 0...1.5, "%.2f")
+                Hint("Warp feeds the previous frame back through a zoom/spin/swirl driven by bass. Beat = how hard detected kicks punch the image.")
+            }
+
+            Section("Screen") {
+                SliderRow("Scanlines", $store.s.scanlines, 0...1, "%.2f")
+                SliderRow("Grain", $store.s.grain, 0...1, "%.2f")
+                SliderRow("Vignette", $store.s.vignette, 0...1, "%.2f")
+                SliderRow("Flicker", $store.s.flicker, 0...1, "%.2f")
             }
 
             Section("Window") {
-                SliderRow(title: "Background opacity", value: $store.s.bgOpacity, range: 0...1, format: "%.2f")
-                Toggle("Always on top (T)", isOn: $store.s.alwaysOnTop)
-                Toggle("Show FPS", isOn: $store.s.showFPS)
+                ColorPicker("Background", selection: bgColor, supportsOpacity: false)
+                SliderRow("Opacity", $store.s.bgOpacity, 0...1, "%.2f")
+                HStack {
+                    Toggle("Always on top", isOn: $store.s.alwaysOnTop)
+                    Toggle("Show FPS", isOn: $store.s.showFPS)
+                }
             }
 
             Section {
-                Button("Reset look to defaults") { store.resetLook() }
-                Text("Keys: 1–6 modes · S settings · Space freeze · F full screen · T always on top. Drag anywhere to move the window.")
-                    .font(.caption).foregroundStyle(.secondary)
+                Button("Reset look") { store.resetLook() }
+                Hint("1–6 modes · S settings · Space freeze · F full screen · T on top")
             }
         }
         .formStyle(.grouped)
+        .toggleStyle(.checkbox)
+        .controlSize(.mini)
+        .font(.system(size: 11))
+    }
+
+    @ViewBuilder private var detailRow: some View {
+        let d = mode.detail
+        let short = d.label.components(separatedBy: " (").first ?? d.label
+        if d.isLog {
+            SliderRow(short, Binding(
+                get: { log10(store.s[keyPath: d.keyPath]) },
+                set: { store.s[keyPath: d.keyPath] = Self.niceRound(pow(10, $0)) }
+            ), log10(d.range.lowerBound)...log10(d.range.upperBound)) { Self.compact(store.s[keyPath: d.keyPath]) }
+        } else {
+            SliderRow(short, Binding(
+                get: { store.s[keyPath: d.keyPath] },
+                set: { store.s[keyPath: d.keyPath] = $0.rounded(toPlaces: d.range.upperBound > 50 ? 0 : 1) }
+            ), d.range, d.format)
+        }
+    }
+
+    /// Rounds to 2 significant digits so log sliders land on clean numbers.
+    static func niceRound(_ v: Double) -> Double {
+        let mag = pow(10, floor(log10(max(v, 1))) - 1)
+        return (v / mag).rounded() * mag
+    }
+
+    static func grouped(_ v: Double) -> String {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.groupingSeparator = " "
+        return f.string(from: NSNumber(value: Int(v))) ?? "\(Int(v))"
+    }
+
+    static func compact(_ v: Double) -> String {
+        v >= 1_000_000 ? String(format: "%.1fM", v / 1_000_000) : v >= 10_000 ? String(format: "%.0fk", v / 1000) : String(format: "%.0f", v)
+    }
+
+    private var bgColor: Binding<Color> {
+        Binding(
+            get: { Color(.sRGB, red: store.s.bgRed, green: store.s.bgGreen, blue: store.s.bgBlue) },
+            set: { c in
+                guard let ns = NSColor(c).usingColorSpace(.sRGB) else { return }
+                store.s.bgRed = Double(ns.redComponent)
+                store.s.bgGreen = Double(ns.greenComponent)
+                store.s.bgBlue = Double(ns.blueComponent)
+            })
     }
 
     private func logBinding(_ kp: WritableKeyPath<VizSettings, Double>) -> Binding<Double> {
@@ -92,10 +159,11 @@ struct SettingsPanel: View {
     }
 
     private func hz(_ f: Double) -> String {
-        f >= 1000 ? String(format: "%.1f kHz", f / 1000) : String(format: "%.0f Hz", f)
+        f >= 1000 ? String(format: "%.1fk", f / 1000) : String(format: "%.0f", f)
     }
 }
 
+/// One-line slider: label · slider · value.
 struct SliderRow: View {
     let title: String
     @Binding var value: Double
@@ -103,7 +171,7 @@ struct SliderRow: View {
     let format: String
     var label: (() -> String)?
 
-    init(title: String, value: Binding<Double>, range: ClosedRange<Double>, format: String, label: (() -> String)? = nil) {
+    init(_ title: String, _ value: Binding<Double>, _ range: ClosedRange<Double>, _ format: String = "", label: (() -> String)? = nil) {
         self.title = title
         self._value = value
         self.range = range
@@ -112,16 +180,22 @@ struct SliderRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack {
-                Text(title)
-                Spacer()
-                Text(label?() ?? String(format: format, value))
-                    .monospacedDigit()
-                    .foregroundStyle(.secondary)
-            }
-            Slider(value: $value, in: range).labelsHidden().controlSize(.small)
+        HStack(spacing: 6) {
+            Text(title).lineLimit(1).frame(width: 64, alignment: .leading)
+            Slider(value: $value, in: range).labelsHidden()
+            Text(label?() ?? String(format: format, value))
+                .monospacedDigit()
+                .foregroundStyle(.secondary)
+                .frame(width: 44, alignment: .trailing)
         }
+    }
+}
+
+struct Hint: View {
+    let text: String
+    init(_ text: String) { self.text = text }
+    var body: some View {
+        Text(text).font(.system(size: 10)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
 }
 
@@ -129,8 +203,8 @@ struct PaletteSwatch: View {
     let palette: Palette
     var body: some View {
         LinearGradient(gradient: palette.gradient(0, 1, steps: 8), startPoint: .leading, endPoint: .trailing)
-            .frame(width: 36, height: 10)
-            .clipShape(RoundedRectangle(cornerRadius: 3))
+            .frame(width: 28, height: 8)
+            .clipShape(RoundedRectangle(cornerRadius: 2))
     }
 }
 
