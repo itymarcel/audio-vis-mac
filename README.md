@@ -54,6 +54,17 @@ Other keys: Space freezes the frame, F toggles full screen, T keeps the window o
 to get a see-through overlay.
 
 
+## Nodes (N, or the HUD's node button)
+
+A separate window with a node editor that connects the music to any setting. Right-click the dotted grid to add a node, drag from a node's output (right dot) to another node's input (left dot), drag a connected input away to unplug or re-route it. Drag a header to move a node, drag the background to pan, select a node and press ⌫ to delete it (or right-click it: Duplicate / Disconnect / Delete). Numbers are scrubbed by dragging sideways (⌥ = fine); double-click one to type a value (Enter commits, Escape cancels). Constant and Map range use plain number boxes with no limits. Each node shows its live output value and a level bar.
+
+- **Music**: Bass, Mids, Highs or any frequency band, Loudness, Beat, Kick / Snare / Hats hit (with decay), Pitch, Brightness.
+- **Generators**: LFO (sine, triangle, saw, square), Random (with glide), Constant.
+- **Modifiers**: Map range, Smooth (separate rise and fall), Curve, Invert, Threshold, Steps, Math (+, −, ×, min, max, mix), Accumulate (turns a level into steady motion, e.g. continuous spinning), Sample & hold.
+- **Parameter** (output): drives a setting. *Add* puts input × amount × the setting's range on top of its slider value; *Set* lets the input (0 … 1) span the whole range. Targets: response (gain, floor, tilt, smoothing, frequency range), shape & motion (size, glow, trails, motion, zoom, reach), colour, warp, beat, camera (orbit spin, orbit tilt, zoom), per-mode knobs and screen effects.
+
+The patch is saved with the settings and with presets. Modulation never changes the stored slider values; *Patch active* switches the whole patch off. Loops are refused when wiring.
+
 ## Rendering
 Everything is drawn on the GPU with Metal, with shaders compiled at runtime, so Xcode isn't needed:
 - **Sphere:** up to 2M points, with 6 layouts (Poles, Harmonics, Ripples, Terrain, Cells, Time globe).
@@ -69,4 +80,5 @@ Environment variables (debug runs never save settings):
 - `AUDIOWATCH_SNAPSHOT=/tmp/shot AUDIOWATCH_SNAPSHOT_FRAMES=10,240` writes `/tmp/shot-<frame>.png` and quits after the last one.
 - `AUDIOWATCH_TRACE=1` prints the audio playhead per frame.
 - `AUDIOWATCH_PERF=1` prints CPU build time and GPU time (ms) per frame.
+- `AUDIOWATCH_NODES_SNAPSHOT=/path.png` opens the Nodes window and saves a picture of it after ~3 s.
 - Show FPS also reports the audio device's burst size and the playhead buffer.

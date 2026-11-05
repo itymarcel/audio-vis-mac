@@ -6,6 +6,7 @@ struct ContentView: View {
     @Bindable var store: SettingsStore
     @Bindable var app: AppState
     let engine: VizEngine
+    @Environment(\.openWindow) private var openWindow
 
     @State private var hudVisible = true
     @State private var hudHovered = false
@@ -68,6 +69,7 @@ struct ContentView: View {
         .onAppear {
             engine.start(app: app)
             pokeHUD()
+            if DebugSnapshot.nodesPath != nil { openWindow(id: "nodes") }
         }
     }
 
@@ -173,6 +175,7 @@ final class DraggableMTKView: MTKView {
 struct HUD: View {
     @Bindable var store: SettingsStore
     @Bindable var app: AppState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         HStack(spacing: 6) {
@@ -204,6 +207,10 @@ struct HUD: View {
                 Image(systemName: "slider.horizontal.3").frame(width: 14)
             }
             .help("Settings (S)")
+            Button { openWindow(id: "nodes") } label: {
+                Image(systemName: "point.3.connected.trianglepath.dotted").frame(width: 14)
+            }
+            .help("Nodes: connect the music to any setting (N)")
         }
         .buttonStyle(.borderless)
         .controlSize(.small)

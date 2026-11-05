@@ -32,3 +32,17 @@ enum DebugSnapshot {
         }
     }
 }
+
+extension DebugSnapshot {
+    /// Debug aid: AUDIOWATCH_NODES_SNAPSHOT=/path.png opens the Nodes window and saves a picture of it after ~3 s.
+    static let nodesPath = ProcessInfo.processInfo.environment["AUDIOWATCH_NODES_SNAPSHOT"]
+
+    static func captureWindow(_ view: NSView) {
+        guard let nodesPath else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3) {
+            guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+            view.cacheDisplay(in: view.bounds, to: rep)
+            try? rep.representation(using: .png, properties: [:])?.write(to: URL(fileURLWithPath: nodesPath))
+        }
+    }
+}

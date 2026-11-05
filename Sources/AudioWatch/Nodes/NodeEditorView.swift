@@ -1,0 +1,574 @@
+import AppKit
+import SwiftUI
+
+/// Fixed node geometry, so port positions can be computed without measuring views.
+private enum NL {
+    static let width: CGFloat = 196
+    static let header: CGFloat = 26
+    static let row: CGFloat = 22
+    static let pad: CGFloat = 4
+
+    static func rows(_ k: NodeKind) -> Int { k.inputs.count + k.fields.count + (k == .param ? 1 : 0) }
+    static func height(_ k: NodeKind) -> CGFloat { header + pad * 2 + CGFloat(rows(k)) * row }
+    static func inPort(_ n: GraphNode, _ i: Int) -> CGPoint {
+        CGPoint(x: n.x, y: n.y + header + pad + row * (CGFloat(i) + 0.5))
+    }
+    static func outPort(_ n: GraphNode) -> CGPoint { CGPoint(x: n.x + width, y: n.y + header / 2) }
+}
+
+extension NodeCategory {
+    var color: Color {
+        switch self {
+        case .input: Color(red: 0.35, green: 0.85, blue: 0.55)
+        case .generator: Color(red: 0.75, green: 0.5, blue: 1)
+        case .modifier: Color(red: 0.4, green: 0.68, blue: 1)
+        case .output: Color(red: 1, green: 0.62, blue: 0.3)
+        }
+    }
+}
+
+struct NodeEditorView: View {
+    @Bindable var store: SettingsStore
+    @Bindable var app: AppState
+    let engine: VizEngine
+    @State private var window: NSWindow?
+    @State private var keyMonitor: Any?
+
+    @State private var pan = CGSize(width: 40, height: 40)
+    @State private var panStart: CGSize?
+    @State private var hover = CGPoint(x: 200, y: 200)
+    @State private var selection: UUID?
+    @State private var moving: (id: UUID, offset: CGSize)?
+    @State private var wire: (from: UUID, to: CGPoint)?
+
+    private var graph: NodeGraph { store.s.nodes }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            background
+            wires.allowsHitTesting(false)
+            ForEach(graph.nodes) { n in
+                NodeCard(store: store, app: app, engine: engine, id: n.id, selected: selection == n.id,
+                         onSelect: { selection = n.id; endTyping() },
+                         onMove: { t in moving = (n.id, t) },
+                         onMoveEnd: { t in commitMove(n.id, t) })
+                    .position(center(of: n))
+            }
+            ports
+            if graph.nodes.isEmpty {
+                Text("Right-click to add nodes.\nDrag from a node's output (right dot) to an input (left dot).")
+                    .multilineTextAlignment(.center)
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .allowsHitTesting(false)
+            }
+            toolbar
+        }
+        .coordinateSpace(.named("canvas"))
+        .onContinuousHover(coordinateSpace: .named("canvas")) { phase in
+            if case .active(let p) = phase { hover = p }
+        }
+        .background(Color(white: 0.075))
+        .clipped()
+        .environment(\.colorScheme, .dark)
+        .background(WindowAccessor { w in
+            window = w
+            if let v = w.contentView { DebugSnapshot.captureWindow(v) }
+        })
+        .onAppear { installKeyMonitor() }
+        .onDisappear {
+            if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+            keyMonitor = nil
+        }
+    }
+
+    // MARK: - Layers
+
+    private var background: some View {
+        Canvas { ctx, size in
+            let step: CGFloat = 22
+            let ox = pan.width.truncatingRemainder(dividingBy: step), oy = pan.height.truncatingRemainder(dividingBy: step)
+            var dots = Path()
+            var y = oy - step
+            while y < size.height + step {
+                var x = ox - step
+                while x < size.width + step {
+                    dots.addEllipse(in: CGRect(x: x - 0.9, y: y - 0.9, width: 1.8, height: 1.8))
+                    x += step
+                }
+                y += step
+            }
+            ctx.fill(dots, with: .color(Color(white: 0.28)))
+        }
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 2)
+            .onChanged { g in
+                if panStart == nil { panStart = pan }
+                pan = CGSize(width: panStart!.width + g.translation.width, height: panStart!.height + g.translation.height)
+            }
+            .onEnded { _ in panStart = nil })
+        .onTapGesture { selection = nil; endTyping() }
+        .contextMenu { addMenu }
+    }
+
+    @ViewBuilder private var addMenu: some View {
+        ForEach(NodeKind.menu, id: \.category) { section in
+            Section(section.category.rawValue) {
+                ForEach(section.items, id: \.title) { item in
+                    Button(item.title) { add(item.kind, values: item.values) }
+                }
+            }
+        }
+    }
+
+    private var wires: some View {
+        Canvas { ctx, _ in
+            for l in graph.links {
+                guard let a = node(l.from), let b = node(l.to) else { continue }
+                let p0 = view(NL.outPort(a)), p1 = view(NL.inPort(b, l.port))
+                ctx.stroke(curve(p0, p1), with: .color(a.kind.category.color.opacity(0.8)), lineWidth: 2)
+            }
+            if let w = wire, let a = node(w.from) {
+                ctx.stroke(curve(view(NL.outPort(a)), w.to), with: .color(.white.opacity(0.7)),
+                           style: StrokeStyle(lineWidth: 2, dash: [5, 4]))
+            }
+        }
+    }
+
+    private var ports: some View {
+        ForEach(graph.nodes) { n in
+            if n.kind.hasOutput {
+                PortDot(color: n.kind.category.color, filled: graph.links.contains { $0.from == n.id })
+                    .position(view(NL.outPort(n)))
+                    .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("canvas"))
+                        .onChanged { g in wire = (n.id, g.location) }
+                        .onEnded { g in connect(from: n.id, at: g.location); wire = nil })
+                    .help("Drag to an input")
+            }
+            ForEach(n.kind.inputs.indices, id: \.self) { i in
+                let link = graph.link(into: n.id, port: i)
+                PortDot(color: link.flatMap { node($0.from) }?.kind.category.color ?? .gray, filled: link != nil)
+                    .position(view(NL.inPort(n, i)))
+                    .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("canvas"))
+                        .onChanged { g in
+                            // pulling a connected input detaches the wire and keeps it on the cursor
+                            if wire == nil, let l = graph.link(into: n.id, port: i) {
+                                store.s.nodes.links.removeAll { $0 == l }
+                                wire = (l.from, g.location)
+                            } else if let w = wire { wire = (w.from, g.location) }
+                        }
+                        .onEnded { g in
+                            if let w = wire { connect(from: w.from, at: g.location) }
+                            wire = nil
+                        })
+                    .help(link == nil ? "Input" : "Drag to disconnect or re-route")
+            }
+        }
+    }
+
+    private var toolbar: some View {
+        HStack(spacing: 10) {
+            Toggle("Patch active", isOn: $store.s.nodes.enabled)
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+            Text("Right-click: add · drag background: pan · ⌫: delete selected")
+                .font(.system(size: 10))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Button("Reset view") { pan = CGSize(width: 40, height: 40) }
+            Button("Clear all") {
+                store.s.nodes.nodes = []
+                store.s.nodes.links = []
+                selection = nil
+            }
+            .disabled(graph.nodes.isEmpty)
+        }
+        .buttonStyle(.borderless)
+        .controlSize(.small)
+        .padding(.horizontal, 12).padding(.vertical, 6)
+        .background(.regularMaterial)
+    }
+
+    // MARK: - Geometry
+
+    private func node(_ id: UUID) -> GraphNode? {
+        guard var n = graph.node(id) else { return nil }
+        if let m = moving, m.id == id { n.x += m.offset.width; n.y += m.offset.height }
+        return n
+    }
+    private func view(_ p: CGPoint) -> CGPoint { CGPoint(x: p.x + pan.width, y: p.y + pan.height) }
+    private func center(of n: GraphNode) -> CGPoint {
+        let n = node(n.id) ?? n
+        return view(CGPoint(x: n.x + NL.width / 2, y: n.y + NL.height(n.kind) / 2))
+    }
+    private func curve(_ a: CGPoint, _ b: CGPoint) -> Path {
+        let dx = max(40, abs(b.x - a.x) * 0.5)
+        var p = Path()
+        p.move(to: a)
+        p.addCurve(to: b, control1: CGPoint(x: a.x + dx, y: a.y), control2: CGPoint(x: b.x - dx, y: b.y))
+        return p
+    }
+
+    // MARK: - Editing
+
+    /// Clicking a node or the grid finishes any number being typed (so ⌫ deletes nodes again).
+    private func endTyping() {
+        if window?.firstResponder is NSText { window?.makeFirstResponder(nil) }
+    }
+
+    /// ⌫ / ⌦ deletes the selected node, unless a number box is being typed in.
+    private func installKeyMonitor() {
+        guard keyMonitor == nil else { return }
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { e in
+            guard e.keyCode == 51 || e.keyCode == 117, let w = window, e.window === w,
+                  !(w.firstResponder is NSText), let id = selection else { return e }
+            delete(id)
+            return nil
+        }
+    }
+
+    private func add(_ kind: NodeKind, values: [String: Double]) {
+        var n = GraphNode(kind: kind, x: hover.x - pan.width - 20, y: hover.y - pan.height - 12, values: values)
+        if kind == .param { n.target = "size" }
+        store.s.nodes.nodes.append(n)
+        selection = n.id
+    }
+
+    private func delete(_ id: UUID) {
+        store.s.nodes.links.removeAll { $0.from == id || $0.to == id }
+        store.s.nodes.nodes.removeAll { $0.id == id }
+        if selection == id { selection = nil }
+    }
+
+    private func commitMove(_ id: UUID, _ t: CGSize) {
+        if let i = store.s.nodes.nodes.firstIndex(where: { $0.id == id }) {
+            store.s.nodes.nodes[i].x += t.width
+            store.s.nodes.nodes[i].y += t.height
+        }
+        moving = nil
+    }
+
+    /// Connects `from` to the input under `p`: the nearest port, or the first free input of the node under it.
+    private func connect(from: UUID, at p: CGPoint) {
+        var best: (id: UUID, port: Int, d: CGFloat)?
+        for n in graph.nodes where n.id != from && !n.kind.inputs.isEmpty {
+            for i in n.kind.inputs.indices {
+                let q = view(NL.inPort(n, i))
+                let d = hypot(q.x - p.x, q.y - p.y)
+                if d < 18, d < (best?.d ?? .infinity) { best = (n.id, i, d) }
+            }
+            if best == nil {
+                let o = view(CGPoint(x: n.x, y: n.y))
+                if CGRect(x: o.x, y: o.y, width: NL.width, height: NL.height(n.kind)).contains(p) {
+                    let free = n.kind.inputs.indices.first { graph.link(into: n.id, port: $0) == nil } ?? 0
+                    best = (n.id, free, 0)
+                }
+            }
+        }
+        guard let b = best, !reaches(b.id, from) else { return }
+        store.s.nodes.links.removeAll { $0.to == b.id && $0.port == b.port }
+        store.s.nodes.links.append(NodeLink(from: from, to: b.id, port: b.port))
+    }
+
+    /// True if `a`'s output already flows (directly or not) into `b`: connecting b → a would make a loop.
+    private func reaches(_ a: UUID, _ b: UUID) -> Bool {
+        if a == b { return true }
+        var stack = [a], seen: Set<UUID> = []
+        while let x = stack.popLast() {
+            if x == b { return true }
+            guard seen.insert(x).inserted else { continue }
+            stack += graph.links.filter { $0.from == x }.map(\.to)
+        }
+        return false
+    }
+}
+
+// MARK: - Pieces
+
+private struct PortDot: View {
+    let color: Color
+    let filled: Bool
+    var body: some View {
+        ZStack {
+            Circle().fill(Color(white: 0.1))
+            Circle().strokeBorder(color, lineWidth: 2)
+            if filled { Circle().fill(color).padding(4) }
+        }
+        .frame(width: 13, height: 13)
+        .padding(5)               // bigger hit area
+        .contentShape(Circle())
+    }
+}
+
+private struct NodeCard: View {
+    @Bindable var store: SettingsStore
+    @Bindable var app: AppState
+    let engine: VizEngine
+    let id: UUID
+    let selected: Bool
+    let onSelect: () -> Void
+    let onMove: (CGSize) -> Void
+    let onMoveEnd: (CGSize) -> Void
+
+    private var index: Int? { store.s.nodes.nodes.firstIndex { $0.id == id } }
+
+    var body: some View {
+        if let i = index {
+            let n = store.s.nodes.nodes[i]
+            let color = n.kind.category.color
+            VStack(spacing: 0) {
+                header(n, color)
+                VStack(spacing: 0) {
+                    ForEach(Array(n.kind.inputs.enumerated()), id: \.offset) { _, name in
+                        Text(name).font(.system(size: 10)).foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading).padding(.leading, 12)
+                            .frame(height: NL.row)
+                    }
+                    if n.kind == .param { targetPicker(i).frame(height: NL.row) }
+                    ForEach(n.kind.fields, id: \.key) { f in
+                        // in Set mode the input spans the whole range, so Amount has no effect
+                        let idle = n.kind == .param && f.key == "amount" && n.value("mode") >= 0.5
+                        fieldRow(i, f).frame(height: NL.row)
+                            .opacity(idle ? 0.35 : 1)
+                            .allowsHitTesting(!idle)
+                    }
+                }
+                .padding(.vertical, NL.pad)
+                .padding(.horizontal, 8)
+            }
+            .frame(width: NL.width, height: NL.height(n.kind), alignment: .top)
+            .background(RoundedRectangle(cornerRadius: 8).fill(Color(white: 0.14)))
+            .overlay(RoundedRectangle(cornerRadius: 8)
+                .strokeBorder(selected ? Color.white.opacity(0.8) : color.opacity(0.35), lineWidth: selected ? 1.5 : 1))
+            .shadow(color: .black.opacity(0.4), radius: 6, y: 2)
+            .onTapGesture { onSelect() }
+            .contextMenu {
+                Button("Duplicate") {
+                    var c = n
+                    c.id = UUID(); c.x += 24; c.y += 24
+                    store.s.nodes.nodes.append(c)
+                }
+                Button("Disconnect") { store.s.nodes.links.removeAll { $0.from == id || $0.to == id } }
+                Divider()
+                Button("Delete", role: .destructive) {
+                    store.s.nodes.links.removeAll { $0.from == id || $0.to == id }
+                    store.s.nodes.nodes.removeAll { $0.id == id }
+                }
+            }
+        }
+    }
+
+    private func header(_ n: GraphNode, _ color: Color) -> some View {
+        HStack(spacing: 6) {
+            Circle().fill(color).frame(width: 7, height: 7)
+            Text(n.kind == .param ? (ModParam.byID[n.target]?.title ?? "Parameter") : title(n))
+                .font(.system(size: 11, weight: .semibold))
+                .lineLimit(1)
+            Spacer(minLength: 4)
+            TimelineView(.animation(minimumInterval: 1 / 30)) { _ in
+                let pinned = engine.nodes.limited.contains(n.id)
+                HStack(spacing: 3) {
+                    if pinned { Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 8)) }
+                    Text(valueText(n)).font(.system(size: 10).monospacedDigit())
+                }
+                .foregroundStyle(pinned ? AnyShapeStyle(Color.yellow) : AnyShapeStyle(.secondary))
+                .help(pinned ? "Pinned at the end of its range: lower Amount, or put a Map range before it." : "")
+            }
+        }
+        .padding(.horizontal, 10)
+        .frame(height: NL.header)
+        .background(color.opacity(0.16))
+        .overlay(alignment: .bottomLeading) {
+            // live level of this node's output
+            TimelineView(.animation(minimumInterval: 1 / 30)) { _ in
+                Rectangle().fill(color)
+                    .frame(width: NL.width * CGFloat(meter(n)), height: 3)
+            }
+        }
+        .clipShape(UnevenRoundedRectangle(topLeadingRadius: 8, topTrailingRadius: 8))
+        .contentShape(Rectangle())
+        .gesture(DragGesture(minimumDistance: 1, coordinateSpace: .named("canvas"))
+            .onChanged { g in onSelect(); onMove(g.translation) }
+            .onEnded { g in onMoveEnd(g.translation) })
+        .help(n.kind.help)
+    }
+
+    private func title(_ n: GraphNode) -> String {
+        switch n.kind {
+        case .band:
+            let lo = n.value("lo"), hi = n.value("hi")
+            if lo <= 40 && hi <= 200 { return "Bass" }
+            if lo >= 250 && hi <= 2500 && lo < hi { return "Mids" }
+            if lo >= 3000 { return "Highs" }
+            return n.kind.title
+        case .hit: return ["Kick", "Snare", "Hats"][min(2, max(0, Int(n.value("drum"))))] + " hit"
+        default: return n.kind.title
+        }
+    }
+
+    private func meter(_ n: GraphNode) -> Double {
+        let v = Double(engine.nodes.values[n.id] ?? 0)
+        if n.kind == .param, let p = ModParam.byID[n.target] {
+            let lo = p.isLog ? log(p.range.lowerBound) : p.range.lowerBound
+            let hi = p.isLog ? log(p.range.upperBound) : p.range.upperBound
+            let x = p.isLog ? log(max(1e-6, v)) : v
+            return min(1, max(0, (x - lo) / (hi - lo)))
+        }
+        return min(1, max(0, v))
+    }
+
+    private func valueText(_ n: GraphNode) -> String {
+        guard store.s.nodes.enabled, let v = engine.nodes.values[n.id] else { return "–" }
+        return abs(v) >= 100 ? String(format: "%.0f", v) : String(format: "%.2f", v)
+    }
+
+    private func targetPicker(_ i: Int) -> some View {
+        let cur = store.s.nodes.nodes[i].target
+        return Menu {
+            ForEach(ModParam.groups, id: \.self) { g in
+                Section(g) {
+                    ForEach(ModParam.all.filter { $0.group == g }) { p in
+                        Button(p.title) { store.s.nodes.nodes[i].target = p.id }
+                    }
+                }
+            }
+        } label: {
+            Text(ModParam.byID[cur]?.title ?? "Choose…").font(.system(size: 10))
+        }
+        .menuStyle(.borderlessButton)
+        .controlSize(.mini)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @ViewBuilder private func fieldRow(_ i: Int, _ f: NodeField) -> some View {
+        let binding = Binding<Double>(
+            get: { store.s.nodes.nodes.indices.contains(i) ? store.s.nodes.nodes[i].value(f.key) : f.def },
+            set: { v in if store.s.nodes.nodes.indices.contains(i) { store.s.nodes.nodes[i].values[f.key] = v } })
+        if f.free {
+            HStack(spacing: 4) {
+                Text(f.label).font(.system(size: 10)).foregroundStyle(.secondary)
+                Spacer(minLength: 2)
+                NumberBox(field: f, value: binding, app: app, autofocus: false, onDone: {})
+                    .frame(width: 90)
+            }
+        } else if f.options.isEmpty {
+            ScrubField(field: f, value: binding, app: app)
+        } else {
+            HStack(spacing: 4) {
+                Text(f.label).font(.system(size: 10)).foregroundStyle(.secondary)
+                Spacer(minLength: 2)
+                Picker(f.label, selection: Binding(get: { Int(binding.wrappedValue.rounded()) },
+                                                   set: { binding.wrappedValue = Double($0) })) {
+                    ForEach(f.options.indices, id: \.self) { Text(f.options[$0]).tag($0) }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .controlSize(.mini)
+                .fixedSize()
+            }
+        }
+    }
+}
+
+/// A number you change by dragging sideways (⌥ = fine). Double-click resets it.
+private struct ScrubField: View {
+    let field: NodeField
+    @Binding var value: Double
+    let app: AppState
+    @State private var start: Double?
+    @State private var editing = false
+
+    private func norm(_ v: Double) -> Double {
+        let r = field.range
+        if field.isLog { return (log(v) - log(r.lowerBound)) / (log(r.upperBound) - log(r.lowerBound)) }
+        return (v - r.lowerBound) / (r.upperBound - r.lowerBound)
+    }
+    private func denorm(_ t: Double) -> Double {
+        let r = field.range, t = min(1, max(0, t))
+        if field.isLog { return exp(log(r.lowerBound) + t * (log(r.upperBound) - log(r.lowerBound))) }
+        return r.lowerBound + t * (r.upperBound - r.lowerBound)
+    }
+
+    var body: some View {
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 4).fill(Color(white: 0.2))
+                RoundedRectangle(cornerRadius: 4).fill(Color.white.opacity(0.12))
+                    .frame(width: max(0, geo.size.width * min(1, max(0, norm(value)))))
+                HStack {
+                    Text(field.label).foregroundStyle(.secondary)
+                    Spacer()
+                    if editing {
+                        NumberBox(field: field, value: $value, app: app, autofocus: true) { editing = false }
+                            .frame(width: 70)
+                    } else {
+                        Text(String(format: field.format, value)).monospacedDigit()
+                    }
+                }
+                .font(.system(size: 10))
+                .padding(.horizontal, 6)
+            }
+            .contentShape(Rectangle())
+            .gesture(DragGesture(minimumDistance: 1)
+                .onChanged { g in
+                    if start == nil { start = norm(value) }
+                    let fine = NSEvent.modifierFlags.contains(.option) ? 0.1 : 1
+                    var v = denorm(start! + g.translation.width / geo.size.width * fine)
+                    if field.format.hasPrefix("%.0f") { v = v.rounded() }
+                    value = v
+                }
+                .onEnded { _ in start = nil })
+            .simultaneousGesture(TapGesture(count: 2).onEnded { editing = true })
+            .onHover { inside in if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() } }
+        }
+        .frame(height: 18)
+        .help("Drag sideways to change (⌥ for fine steps). Double-click to type a value.")
+    }
+}
+
+/// Typed number entry. Enter or clicking elsewhere commits, Escape cancels.
+private struct NumberBox: View {
+    let field: NodeField
+    @Binding var value: Double
+    let app: AppState
+    let autofocus: Bool
+    let onDone: () -> Void
+    @State private var text = ""
+    @FocusState private var focus: Bool
+
+    var body: some View {
+        TextField("", text: $text)
+            .textFieldStyle(.plain)
+            .font(.system(size: 10).monospacedDigit())
+            .multilineTextAlignment(.trailing)
+            .padding(.horizontal, 4)
+            .frame(height: 16)
+            .background(RoundedRectangle(cornerRadius: 3).fill(Color(white: focus ? 0.24 : 0.19)))
+            .overlay(RoundedRectangle(cornerRadius: 3).strokeBorder(Color.white.opacity(focus ? 0.4 : 0), lineWidth: 1))
+            .focused($focus)
+            .onAppear {
+                text = Self.show(value)
+                if autofocus { DispatchQueue.main.async { focus = true } }
+            }
+            .onChange(of: value) { _, v in if !focus { text = Self.show(v) } }
+            .onChange(of: focus) { _, f in
+                // single-key menu shortcuts (S, F, N, Space, digits) are off while typing
+                app.textEditing = f
+                if !f { commit(); onDone() }
+            }
+            .onSubmit { focus = false }
+            .onExitCommand { text = Self.show(value); focus = false }
+    }
+
+    private func commit() {
+        let t = text.replacingOccurrences(of: ",", with: ".").trimmingCharacters(in: .whitespaces)
+        guard let v = Double(t), v.isFinite else { text = Self.show(value); return }
+        value = min(field.range.upperBound, max(field.range.lowerBound, v))
+        text = Self.show(value)
+    }
+
+    private static func show(_ v: Double) -> String {
+        v == v.rounded() && abs(v) < 1e9 ? String(format: "%.0f", v) : String(format: "%g", v)
+    }
+}

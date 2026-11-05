@@ -358,7 +358,6 @@ final class Renderer: NSObject, MTKViewDelegate {
         }
         _ = semaphore.wait(timeout: .distantFuture)
 
-        let s = store.s
         let frozen = app.frozen
         let now = CACurrentMediaTime()
         if startTime == nil { startTime = now }
@@ -376,8 +375,12 @@ final class Renderer: NSObject, MTKViewDelegate {
         // CPU: analysis + primitive building
         let cpu0 = CACurrentMediaTime()
         builder.reset()
-        var rc = engine.prepare(size: sizePt, settings: s, dt: dt, time: elapsed, frozen: frozen)
-        let cam = app.camera.step(s.mode, dt: dt)
+        var rc = engine.prepare(size: sizePt, settings: store.s, dt: dt, time: elapsed, frozen: frozen)
+        let s = rc.s   // with the node patch applied
+        var cam = app.camera.step(s.mode, dt: dt)
+        cam.yaw += engine.nodes.camYaw
+        cam.pitch = min(1.5, max(-1.5, cam.pitch + engine.nodes.camPitch))
+        cam.zoom *= engine.nodes.camZoom
         rc.camera = cam
         engine.visualizer(for: s.mode).build(builder, rc)
         ensurePalette(s.palette)

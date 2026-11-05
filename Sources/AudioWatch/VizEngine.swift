@@ -11,6 +11,8 @@ final class VizEngine {
     private var statusTimer: Timer?
     private var startTime = Date().timeIntervalSinceReferenceDate
     private var cyclePhase: Float = 0
+    /// Evaluates the node patch each frame.
+    let nodes = NodeRuntime()
     /// Smoothed frame rate, written by the renderer.
     var fps: Double = 0
 
@@ -61,10 +63,11 @@ final class VizEngine {
         }
     }
 
-    func prepare(size: SIMD2<Float>, settings s: VizSettings, dt: Double, time: Double, frozen: Bool) -> RenderContext {
+    func prepare(size: SIMD2<Float>, settings base: VizSettings, dt: Double, time: Double, frozen: Bool) -> RenderContext {
         // The waterfall shows time smearing directly, so it keeps one consistent window.
-        analyzer.lowLatency = s.lowLatency && s.mode.supportsLowLatency
-        if !frozen { analyzer.update(now: CACurrentMediaTimeSafe(), fftSize: Int(s.fftSize)) }
+        analyzer.lowLatency = base.lowLatency && base.mode.supportsLowLatency
+        if !frozen { analyzer.update(now: CACurrentMediaTimeSafe(), fftSize: Int(base.fftSize)) }
+        let s = nodes.apply(base, analyzer: analyzer, dt: dt, frozen: frozen)
         cyclePhase += Float(dt * s.colorCycle * 0.15)
         if cyclePhase > 2 { cyclePhase -= 2 }
         let ink = s.palette.ink

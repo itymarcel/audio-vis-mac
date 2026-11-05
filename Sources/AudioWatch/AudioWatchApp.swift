@@ -16,6 +16,12 @@ struct AudioWatchApp: App {
         .windowStyle(.hiddenTitleBar)
         .defaultSize(width: 1100, height: 720)
         .commands { VizCommands(store: store, app: app) }
+
+        Window("Nodes", id: "nodes") {
+            NodeEditorView(store: store, app: app, engine: engine)
+                .frame(minWidth: 520, minHeight: 360)
+        }
+        .defaultSize(width: 1000, height: 640)
     }
 }
 
@@ -26,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 struct VizCommands: Commands {
     @Bindable var store: SettingsStore
     @Bindable var app: AppState
+    @Environment(\.openWindow) private var openWindow
 
     var body: some Commands {
         CommandMenu("Visualizer") {
@@ -45,6 +52,9 @@ struct VizCommands: Commands {
                 .disabled(app.textEditing)
             Button(app.frozen ? "Unfreeze" : "Freeze Frame") { app.frozen.toggle() }
                 .keyboardShortcut(.space, modifiers: [])
+                .disabled(app.textEditing)
+            Button("Nodes…") { openWindow(id: "nodes") }
+                .keyboardShortcut("n", modifiers: [])
                 .disabled(app.textEditing)
             Button("Centre View") { app.camera.centre() }
                 .keyboardShortcut("r", modifiers: [])

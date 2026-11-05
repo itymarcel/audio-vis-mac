@@ -243,7 +243,7 @@ final class ScopeViz: Visualizer {
         let spacing: Float = 2 / Float(ridgeCount)
         let glide = Float(ridgeAcc)                 // fraction of the way to the next push
         // default view: looking down onto the landscape; the user's orbit goes on top
-        let view = rc.camera.rotation * Self.rotX(0.55)
+        let view = Self.rotX(0.55) * rc.camera.rotation
         let camDist: Float = 4.2
         func project(_ p: SIMD3<Float>) -> (SIMD2<Float>, Float) {
             let q = view * p                         // landscape is centred on the origin

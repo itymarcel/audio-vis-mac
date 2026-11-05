@@ -15,10 +15,14 @@ struct Onsets {
 
     /// Returns (band, strength 0…1) for each band that fired this frame.
     mutating func step(_ rc: RenderContext) -> [(band: Int, strength: Float)] {
-        var s2 = rc.s
+        step(analyzer: rc.analyzer, s: rc.s, dt: rc.dt)
+    }
+
+    mutating func step(analyzer: Analyzer, s: VizSettings, dt: Double) -> [(band: Int, strength: Float)] {
+        var s2 = s
         s2.minFreq = 30; s2.maxFreq = 16_000
-        let b = rc.analyzer.bands(count: 36, s: s2)
-        for g in 0..<3 { since[g] += rc.dt }
+        let b = analyzer.bands(count: 36, s: s2)
+        for g in 0..<3 { since[g] += dt }
         guard prev.count == b.count else { prev = b; return [] }
         var out: [(band: Int, strength: Float)] = []
         for (g, range) in [0..<9, 9..<23, 23..<36].enumerated() {
@@ -29,7 +33,7 @@ struct Onsets {
                 since[g] = 0
                 out.append((g, min(1, flux * 5)))
             }
-            avg[g] += (flux - avg[g]) * Float(1 - exp(-rc.dt / 0.4))
+            avg[g] += (flux - avg[g]) * Float(1 - exp(-dt / 0.4))
         }
         prev = b
         return out
@@ -289,7 +293,7 @@ final class PrimitivesViz: Visualizer {
             if prims.count > cap { prims.removeFirst(prims.count - cap) }
         }
 
-        let view = rc.camera.rotation * rotX(0.18) * rotY(drift)
+        let view = rotX(0.18) * rc.camera.rotation * rotY(drift)
         let world = rc.minDim * 0.36 * Float(s.zoom)
         let lw = max(0.8, rc.unit * 1.1)
         for p in prims {
@@ -484,7 +488,7 @@ final class FieldViz: Visualizer {
             simulate(dt, spring: Float(0.15 + 4.5 * s.fieldSpring * s.fieldSpring), reach: Float(s.reach))
         }
 
-        let view = rc.camera.rotation * rotX(0.25) * rotY(drift)
+        let view = rotX(0.25) * rc.camera.rotation * rotY(drift)
         let world = rc.minDim * 0.44 * Float(s.zoom)
         let lw = max(0.7, rc.unit * 0.9)
         for i in pos.indices {
@@ -644,7 +648,7 @@ final class MushroomsViz: Visualizer {
             spores.removeAll { $0.life <= 0 }
         }
 
-        let view = rc.camera.rotation * rotX(0.22) * rotY(drift)
+        let view = rotX(0.22) * rc.camera.rotation * rotY(drift)
         let world = rc.minDim * 0.42 * Float(s.zoom)
         let lw = max(0.5, rc.unit * 0.8)
         func P(_ p: SIMD3<Float>) -> (SIMD2<Float>, Float) { project(p, view, rc, world: world) }

@@ -46,7 +46,7 @@ final class AttractorViz: Visualizer {
 
         let world = rc.minDim * 0.42 * Float(s.zoom) * (1 + 0.05 * rc.beat)
         // the (1,1,1) diagonal is where slow content lives; tilt it so the loops open towards the viewer
-        let view = rc.camera.rotation * rotX(0.5) * rotY(0.785 + spin)
+        let view = rotX(0.5) * rc.camera.rotation * rotY(0.785 + spin)
         let camDist: Float = 3.6
         let step = max(1, n / 2500)
         var pts: [SIMD2<Float>] = [], ks: [Float] = [], vel: [Float] = []
@@ -134,7 +134,7 @@ final class HarmonographViz: Visualizer {
         let n = Int(swings * 420)
         let decayK = 3.0 / swings                                  // the slowest pendulum ends at ~5 %
         let world = rc.minDim * 0.4 * Float(s.zoom * s.reach) * size * (1 + 0.06 * rc.beat)
-        let view = rc.camera.rotation * rotX(0.35) * rotY(spin)
+        let view = rotX(0.35) * rc.camera.rotation * rotY(spin)
         let ax = amps[0] + amps[3], ay = amps[1] + amps[3]
         var pts: [SIMD2<Float>] = [], ks: [Float] = [], env: [Float] = []
         pts.reserveCapacity(n); ks.reserveCapacity(n); env.reserveCapacity(n)
@@ -199,7 +199,7 @@ final class DrumheadViz: Visualizer {
             cs[k] = Float(cos(Double(modes[k].m) * spin[k])); sn[k] = Float(sin(Double(modes[k].m) * spin[k]))
         }
 
-        let view = rc.camera.rotation * rotX(0.8)
+        let view = rotX(0.8) * rc.camera.rotation
         let world = rc.minDim * 0.4 * Float(s.zoom)
         var pts = [SIMD2<Float>](repeating: .zero, count: count)
         var ks = [Float](repeating: 1, count: count)

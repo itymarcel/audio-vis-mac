@@ -287,6 +287,8 @@ struct VizSettings: Codable, Equatable {
     var look: SurfaceLook = .lines
     /// Field: how strongly particles are pulled back home (0 … 1).
     var fieldSpring: Double = 0.4
+    /// The node patch (Nodes window): music features → modifiers → parameters.
+    var nodes = NodeGraph()
 
     // Window
     // Screen (CRT treatment)
@@ -335,6 +337,7 @@ final class SettingsStore {
         d.mode = s.mode
         d.alwaysOnTop = s.alwaysOnTop
         d.bgOpacity = s.bgOpacity
+        d.nodes = s.nodes
         s = d
     }
 
