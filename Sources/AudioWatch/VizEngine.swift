@@ -23,6 +23,12 @@ final class VizEngine {
         .spectrogram: SpectroViz(),
         .cymatics: CymaticsViz(),
         .flow: FlowViz(),
+        .attractor: AttractorViz(),
+        .harmonograph: HarmonographViz(),
+        .drumhead: DrumheadViz(),
+        .primitives: PrimitivesViz(),
+        .field: FieldViz(),
+        .mushrooms: MushroomsViz(),
     ]
 
     var outputName: String { tap?.outputName ?? "" }
@@ -33,7 +39,7 @@ final class VizEngine {
     func start(app: AppState) {
         guard tap == nil, fileFeed == nil else { return }
         startTime = Date().timeIntervalSinceReferenceDate
-        if let path = ProcessInfo.processInfo.environment["AUDIOVIZ_WAV"] {
+        if let path = ProcessInfo.processInfo.environment["AUDIOWATCH_WAV"] {
             fileFeed = DebugFileFeed(path: path, ring: ring)
             return
         }
@@ -49,7 +55,7 @@ final class VizEngine {
             if let err = self.tapError {
                 msg = "Audio capture failed: \(err). Requires macOS 14.2 or later."
             } else if !app.frozen && now - self.startTime > 3 && CACurrentMediaTimeSafe() - self.analyzer.lastSoundTime > 3 {
-                msg = "No audio signal. If something is playing, allow AudioViz in System Settings › Privacy & Security › Screen & System Audio Recording, then relaunch."
+                msg = "No audio signal. If something is playing, allow AudioWatch in System Settings › Privacy & Security › Screen & System Audio Recording, then relaunch."
             }
             if app.status != msg { app.status = msg }
         }
@@ -57,7 +63,7 @@ final class VizEngine {
 
     func prepare(size: SIMD2<Float>, settings s: VizSettings, dt: Double, time: Double, frozen: Bool) -> RenderContext {
         // The waterfall shows time smearing directly, so it keeps one consistent window.
-        analyzer.lowLatency = s.lowLatency && s.mode != .spectrogram
+        analyzer.lowLatency = s.lowLatency && s.mode.supportsLowLatency
         if !frozen { analyzer.update(now: CACurrentMediaTimeSafe(), fftSize: Int(s.fftSize)) }
         cyclePhase += Float(dt * s.colorCycle * 0.15)
         if cyclePhase > 2 { cyclePhase -= 2 }
@@ -75,7 +81,7 @@ import QuartzCore
 
 import AVFoundation
 
-/// Debug aid: AUDIOVIZ_WAV=/path/file plays a file into the ring in real time (looped) instead of the system tap.
+/// Debug aid: AUDIOWATCH_WAV=/path/file plays a file into the ring in real time (looped) instead of the system tap.
 final class DebugFileFeed {
     private let timer: DispatchSourceTimer
     init?(path: String, ring: AudioRing) {
@@ -86,11 +92,11 @@ final class DebugFileFeed {
         let l = Array(UnsafeBufferPointer(start: ch[0], count: n))
         let r = buf.format.channelCount > 1 ? Array(UnsafeBufferPointer(start: ch[1], count: n)) : l
         ring.sampleRate = sr
-        let chunk = Int(ProcessInfo.processInfo.environment["AUDIOVIZ_WAV_CHUNK"] ?? "512") ?? 512
+        let chunk = Int(ProcessInfo.processInfo.environment["AUDIOWATCH_WAV_CHUNK"] ?? "512") ?? 512
         var pos = 0
         let start = CACurrentMediaTime()
         var sent = 0
-        timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "AudioViz.filefeed", qos: .userInteractive))
+        timer = DispatchSource.makeTimerSource(queue: DispatchQueue(label: "AudioWatch.filefeed", qos: .userInteractive))
         timer.schedule(deadline: .now(), repeating: .milliseconds(2))
         timer.setEventHandler {
             let due = Int((CACurrentMediaTime() - start) * sr)

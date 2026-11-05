@@ -2,14 +2,14 @@ import AppKit
 import SwiftUI
 
 @main
-struct AudioVizApp: App {
+struct AudioWatchApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var store = SettingsStore()
     @State private var app = AppState()
     @State private var engine = VizEngine()
 
     var body: some Scene {
-        Window("AudioViz", id: "main") {
+        Window("AudioWatch", id: "main") {
             ContentView(store: store, app: app, engine: engine)
                 .frame(minWidth: 420, minHeight: 300)
         }
@@ -29,10 +29,15 @@ struct VizCommands: Commands {
 
     var body: some Commands {
         CommandMenu("Visualizer") {
-            ForEach(Array(VizMode.allCases.enumerated()), id: \.element) { i, mode in
+            ForEach(Array(VizMode.stable.prefix(9).enumerated()), id: \.element) { i, mode in
                 Button(mode.title) { store.s.mode = mode }
                     .keyboardShortcut(KeyEquivalent(Character("\(i + 1)")), modifiers: [])
                     .disabled(app.textEditing)
+            }
+            Menu("Experimental") {
+                ForEach(VizMode.experimental) { mode in
+                    Button(mode.title) { store.s.mode = mode }
+                }
             }
             Divider()
             Button(app.showSettings ? "Hide Settings" : "Show Settings") { app.showSettings.toggle() }
@@ -41,7 +46,7 @@ struct VizCommands: Commands {
             Button(app.frozen ? "Unfreeze" : "Freeze Frame") { app.frozen.toggle() }
                 .keyboardShortcut(.space, modifiers: [])
                 .disabled(app.textEditing)
-            Button("Reset View") { app.camera.reset() }
+            Button("Centre View") { app.camera.centre() }
                 .keyboardShortcut("r", modifiers: [])
                 .disabled(app.textEditing)
             Button("Toggle Full Screen") { app.window?.toggleFullScreen(nil) }

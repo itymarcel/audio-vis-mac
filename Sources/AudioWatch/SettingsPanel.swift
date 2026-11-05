@@ -12,7 +12,9 @@ struct SettingsPanel: View {
         Form {
             Section("Mode") {
                 Picker("Mode", selection: $store.s.mode) {
-                    ForEach(VizMode.allCases) { Label($0.title, systemImage: $0.symbol).tag($0) }
+                    ForEach(VizMode.stable) { Label($0.title, systemImage: $0.symbol).tag($0) }
+                    Divider()
+                    ForEach(VizMode.experimental) { Label("\($0.title) (experimental)", systemImage: $0.symbol).tag($0) }
                 }
                 if mode == .sphere {
                     Picker("Layout", selection: $store.s.sphereLayout) {
@@ -27,12 +29,24 @@ struct SettingsPanel: View {
                 } else {
                     Hint(mode.hint)
                 }
-                Picker("Style", selection: $store.s.style) {
-                    ForEach(DrawStyle.allCases) { Text($0.title).tag($0) }
+                if mode.uses(.style) {
+                    Picker("Style", selection: $store.s.style) {
+                        ForEach(DrawStyle.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
                 }
-                .pickerStyle(.segmented)
-                .knob(.style, mode)
+                if mode.usesLook {
+                    Picker("Render", selection: $store.s.look) {
+                        ForEach(SurfaceLook.allCases) { Text($0.title).tag($0) }
+                    }
+                    .pickerStyle(.segmented)
+                    .help("Lines: wireframe outlines. Shaded: solid, lit surfaces. Fresnel: glassy, glowing rims.")
+                }
                 detailRow
+                if mode == .field {
+                    SliderRow("Springiness", $store.s.fieldSpring, 0...1, "%.2f")
+                        .help("How strongly particles are pulled back to their home spot. Low = slow, lazy return; high = snappy.")
+                }
             }
 
             PresetSection(store: store, app: app)
@@ -60,8 +74,10 @@ struct SettingsPanel: View {
                 .knob(.fft, mode)
                 Toggle("Low latency", isOn: $store.s.lowLatency)
                     .knob(.fft, mode)
-                    .disabled(mode == .spectrogram)
-                    .help("Above ~200 Hz use short FFTs, so drums and vocals react within ~20 ms. The FFT size then only sets the bass detail.")
+                    .disabled(!mode.supportsLowLatency)
+                    .help(mode.supportsLowLatency
+                          ? "Above ~200 Hz use short FFTs, so drums and vocals react within ~20 ms. The FFT size then only sets the bass detail."
+                          : "Not used here: this mode's look depends on the full FFT's fine frequency detail.")
                 SliderRow("Gain", $store.s.gain, 0.2...5, "%.2f×").knob(.gain, mode)
                 SliderRow("Floor", $store.s.floorDB, -120...(-30), "%.0f dB").knob(.floor, mode)
                 SliderRow("Tilt", $store.s.tilt, 0...6, "%.1f dB").knob(.tilt, mode)
@@ -265,16 +281,19 @@ struct PresetSection: View {
                         Text(name == selected && !store.matches(name) ? "\(name) (edited)" : name).tag(name)
                     }
                 }
-                .onChange(of: selected) { _, name in if !name.isEmpty { store.applyPreset(name) } }
+                .onChange(of: selected) { _, name in
+                    guard !name.isEmpty else { return }
+                    if let cam = store.applyPreset(name) { app.camera.set(cam, for: store.s.mode) }
+                }
             }
             HStack(spacing: 8) {
                 Button("Save As…") {
                     newName = selected
                     naming = true
                 }
-                Button("Overwrite") { store.savePreset(selected) }
-                    .disabled(selected.isEmpty || store.matches(selected))
-                    .help("Save the current look into the selected preset")
+                Button("Overwrite") { store.savePreset(selected, camera: app.camera.state(for: store.s.mode)) }
+                    .disabled(selected.isEmpty)
+                    .help("Save the current look and camera view into the selected preset")
                 Button("Delete") { confirmDelete = true }
                     .disabled(selected.isEmpty)
                 Spacer()
@@ -286,7 +305,7 @@ struct PresetSection: View {
                 Button("Save") { saveNew() }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("Saves the current look. Using an existing name replaces that preset.")
+                Text("Saves the current look and camera view. Using an existing name replaces that preset.")
             }
             .confirmationDialog("Delete preset \u{201C}\(selected)\u{201D}?", isPresented: $confirmDelete) {
                 Button("Delete", role: .destructive) {
@@ -305,7 +324,7 @@ struct PresetSection: View {
     private func saveNew() {
         let n = newName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !n.isEmpty else { return }
-        store.savePreset(n)
+        store.savePreset(n, camera: app.camera.state(for: store.s.mode))
         selected = n
     }
 }

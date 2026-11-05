@@ -22,6 +22,10 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var cymaticsKernel: MTLComputePipelineState!
     private var flowKernel: MTLComputePipelineState!
     private var partPipe: MTLRenderPipelineState!
+    private var triOverPipe: MTLRenderPipelineState!
+    private var triAddPipe: MTLRenderPipelineState!
+    private var triOverBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
+    private var triAddBufs: [MTLBuffer?] = .init(repeating: nil, count: Renderer.inFlight)
     private var partBuf: MTLBuffer?
     private var partCount = 0
     private var partKind: ParticleKind?
@@ -74,7 +78,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         self.engine = engine
         super.init()
         do { try buildPipelines(view.colorPixelFormat) } catch {
-            NSLog("AudioViz: pipeline error \(error)")
+            NSLog("AudioWatch: pipeline error \(error)")
             return nil
         }
         for _ in 0..<Renderer.inFlight {
@@ -88,7 +92,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private func buildPipelines(_ drawableFormat: MTLPixelFormat) throws {
         let lib = try device.makeLibrary(source: shaderSource, options: nil)
         func fn(_ n: String) -> MTLFunction { lib.makeFunction(name: n)! }
-        enum Blend { case none, add, max }
+        enum Blend { case none, add, max, over }
         func pipe(_ v: String, _ f: String, _ fmt: MTLPixelFormat, _ blend: Blend) throws -> MTLRenderPipelineState {
             let d = MTLRenderPipelineDescriptor()
             d.vertexFunction = fn(v)
@@ -101,6 +105,9 @@ final class Renderer: NSObject, MTKViewDelegate {
                 ca.rgbBlendOperation = op; ca.alphaBlendOperation = op
                 ca.sourceRGBBlendFactor = .one; ca.sourceAlphaBlendFactor = .one
                 ca.destinationRGBBlendFactor = .one; ca.destinationAlphaBlendFactor = .one
+                if blend == .over {
+                    ca.destinationRGBBlendFactor = .oneMinusSourceAlpha; ca.destinationAlphaBlendFactor = .oneMinusSourceAlpha
+                }
             }
             return try device.makeRenderPipelineState(descriptor: d)
         }
@@ -116,6 +123,8 @@ final class Renderer: NSObject, MTKViewDelegate {
         cymaticsKernel = try device.makeComputePipelineState(function: fn("cymaticsKernel"))
         flowKernel = try device.makeComputePipelineState(function: fn("flowKernel"))
         partPipe = try pipe("partVert", "segFrag", sceneFormat, .add)
+        triOverPipe = try pipe("triVert", "triFrag", sceneFormat, .over)
+        triAddPipe = try pipe("triVert", "triFrag", sceneFormat, .add)
     }
 
     func mtkView(_ view: MTKView, drawableSizeWillChange size: CGSize) {
@@ -164,9 +173,9 @@ final class Renderer: NSObject, MTKViewDelegate {
         paletteTex = t
     }
 
-    private func upload(_ segs: [Seg], into slot: inout MTLBuffer?) -> MTLBuffer? {
+    private func upload<T>(_ segs: [T], into slot: inout MTLBuffer?) -> MTLBuffer? {
         guard !segs.isEmpty else { return nil }
-        let bytes = segs.count * MemoryLayout<Seg>.stride
+        let bytes = segs.count * MemoryLayout<T>.stride
         if slot == nil || slot!.length < bytes {
             slot = device.makeBuffer(length: max(bytes * 3 / 2, 4096), options: .storageModeShared)
         }
@@ -339,6 +348,8 @@ final class Renderer: NSObject, MTKViewDelegate {
 
     // MARK: - Frame
 
+    static let perf = ProcessInfo.processInfo.environment["AUDIOWATCH_PERF"] != nil
+
     func draw(in view: MTKView) {
         guard view.drawableSize.width > 0, view.drawableSize.height > 0 else { return }
         // Keep targets exactly the drawable size (the size-change callback can lag behind the first frames).
@@ -363,19 +374,22 @@ final class Renderer: NSObject, MTKViewDelegate {
         let sizePt = px / scale
 
         // CPU: analysis + primitive building
+        let cpu0 = CACurrentMediaTime()
         builder.reset()
         var rc = engine.prepare(size: sizePt, settings: s, dt: dt, time: elapsed, frozen: frozen)
         let cam = app.camera.step(s.mode, dt: dt)
         rc.camera = cam
         engine.visualizer(for: s.mode).build(builder, rc)
         ensurePalette(s.palette)
+        let cpuMs = (CACurrentMediaTime() - cpu0) * 1000
 
         guard let cmd = queue.makeCommandBuffer(), let drawable = view.currentDrawable, scenes.count == 2,
               let bloomA, let bloomB, let paletteTex
         else { semaphore.signal(); return }
         let sem = semaphore
         cmd.addCompletedHandler { cb in
-            if let e = cb.error { NSLog("AudioViz: GPU frame failed: \(e)") }
+            if let e = cb.error { NSLog("AudioWatch: GPU frame failed: \(e)") }
+            if Renderer.perf { print(String(format: "PERF cpu=%.2f gpu=%.2f", cpuMs, (cb.gpuEndTime - cb.gpuStartTime) * 1000)) }
             sem.signal()
         }
 
@@ -475,6 +489,19 @@ final class Renderer: NSObject, MTKViewDelegate {
                 enc.setFragmentBytes(&sd.u, length: MemoryLayout<SpectroUniforms>.stride, index: 0)
                 enc.setFragmentBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
                 enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+            }
+            // surfaces first, so outlines and dots sit on top
+            if let buf = upload(builder.trisOver, into: &triOverBufs[slot]) {
+                enc.setRenderPipelineState(triOverPipe)
+                enc.setVertexBuffer(buf, offset: 0, index: 0)
+                enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: builder.trisOver.count)
+            }
+            if let buf = upload(builder.trisAdd, into: &triAddBufs[slot]) {
+                enc.setRenderPipelineState(triAddPipe)
+                enc.setVertexBuffer(buf, offset: 0, index: 0)
+                enc.setVertexBytes(&U, length: MemoryLayout<GPUUniforms>.stride, index: 1)
+                enc.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: builder.trisAdd.count)
             }
             if let buf = upload(builder.lines, into: &lineBufs[slot]) {
                 enc.setRenderPipelineState(segMaxPipe)

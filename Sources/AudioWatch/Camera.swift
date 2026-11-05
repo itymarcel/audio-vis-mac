@@ -1,7 +1,7 @@
 import simd
 
 /// User view transform: orbit (yaw/pitch), pan (points) and zoom.
-struct CameraState: Equatable {
+struct CameraState: Equatable, Codable {
     var yaw: Float = 0
     var pitch: Float = 0
     var pan = SIMD2<Float>()
@@ -46,7 +46,14 @@ final class Camera {
         }
     }
 
-    func reset() { target[mode] = CameraState() }
+    /// Re-centres the view (orbit and pan) but keeps the zoom.
+    func centre() { edit { $0 = CameraState(zoom: $0.zoom) } }
+
+    /// The view `mode` is heading to (what a preset stores).
+    func state(for mode: VizMode) -> CameraState { target[mode] ?? CameraState() }
+
+    /// Glides `mode`'s view to `c` (applying a preset).
+    func set(_ c: CameraState, for mode: VizMode) { target[mode] = c }
 
     /// Advances the eased state for `mode` and returns it.
     func step(_ mode: VizMode, dt: Double) -> CameraState {

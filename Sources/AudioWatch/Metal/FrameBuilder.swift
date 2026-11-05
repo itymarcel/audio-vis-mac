@@ -12,6 +12,13 @@ struct Seg {
     var pad: Float = 0
 }
 
+/// One vertex of a pre-projected, pre-lit triangle (matches TriV in Shaders.swift).
+struct TriVert {
+    var p: SIMD2<Float>
+    var pad = SIMD2<Float>()
+    var color: SIMD4<Float>
+}
+
 struct GPUUniforms {
     var viewPx: SIMD2<Float>; var pxScale: Float; var time: Float
     /// Camera: rotation rows for tilting the 2D scene plane, then pan (points) and zoom about the window centre.
@@ -101,6 +108,10 @@ final class FrameBuilder {
     var add: [Seg] = []
     /// Max blend: polylines and outlines (joints don't double up).
     var lines: [Seg] = []
+    /// Shaded surfaces, alpha-blended ("over"), already sorted back to front.
+    var trisOver: [TriVert] = []
+    /// Glowing surfaces (fresnel), additive.
+    var trisAdd: [TriVert] = []
     var sphere: SphereDraw?
     var spectro: SpectroDraw?
     var particles: ParticleDraw?
@@ -108,6 +119,8 @@ final class FrameBuilder {
     func reset() {
         add.removeAll(keepingCapacity: true)
         lines.removeAll(keepingCapacity: true)
+        trisOver.removeAll(keepingCapacity: true)
+        trisAdd.removeAll(keepingCapacity: true)
         sphere = nil
         spectro = nil
         particles = nil

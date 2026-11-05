@@ -134,7 +134,7 @@ final class FlowViz: Visualizer {
         d.colorByFreq = s.colorBy == .frequency ? 1 : 0
         d.square = s.segmented ? 1 : 0
         d.streak = s.style == .points ? 0 : 4
-        d.speedK = 150
+        d.speedK = 150 / Float(max(0.05, s.reach))  // colour by flow speed, independent of Reach
         d.kind = ParticleKind.flow.rawValue
         d.count = UInt32(n)
         d.bandCount = UInt32(bands)

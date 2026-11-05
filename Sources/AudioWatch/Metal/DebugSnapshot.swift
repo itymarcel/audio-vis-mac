@@ -1,11 +1,11 @@
 import AppKit
 import Metal
 
-/// Debug aid: with AUDIOVIZ_SNAPSHOT=/path/prefix set, saves the composited frame as PNG at the frame numbers
-/// listed in AUDIOVIZ_SNAPSHOT_FRAMES (comma separated, default "60"), then quits after the last one.
+/// Debug aid: with AUDIOWATCH_SNAPSHOT=/path/prefix set, saves the composited frame as PNG at the frame numbers
+/// listed in AUDIOWATCH_SNAPSHOT_FRAMES (comma separated, default "60"), then quits after the last one.
 enum DebugSnapshot {
-    static let prefix = ProcessInfo.processInfo.environment["AUDIOVIZ_SNAPSHOT"]
-    static let frames: [Int] = (ProcessInfo.processInfo.environment["AUDIOVIZ_SNAPSHOT_FRAMES"] ?? "60")
+    static let prefix = ProcessInfo.processInfo.environment["AUDIOWATCH_SNAPSHOT"]
+    static let frames: [Int] = (ProcessInfo.processInfo.environment["AUDIOWATCH_SNAPSHOT_FRAMES"] ?? "60")
         .split(separator: ",").compactMap { Int($0) }
     static var enabled: Bool { prefix != nil }
 

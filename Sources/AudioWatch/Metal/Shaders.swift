@@ -173,6 +173,26 @@ static SegOut makeSeg(float2 aPt, float2 bPt, float widthPt, float4 color, float
     return o;
 }
 
+// ---------------------------------------------------------------- shaded triangles (3D surfaces)
+
+struct TriV { float2 p; float2 pad; float4 color; };
+struct TriOut { float4 pos [[position]]; float4 color; };
+
+/// Pre-projected, pre-lit triangle vertices (window points); only pan/zoom is applied here.
+vertex TriOut triVert(uint vid [[vertex_id]], const device TriV* T [[buffer(0)]], constant Uniforms& U [[buffer(1)]]) {
+    TriV t = T[vid];
+    float2 px = camXf(t.p, U).xy * U.pxScale;
+    float2 ndc = px / U.viewPx * 2.0 - 1.0;
+    TriOut o;
+    o.pos = float4(ndc.x, -ndc.y, 0.0, 1.0);
+    o.color = t.color;
+    return o;
+}
+
+fragment float4 triFrag(TriOut in [[stage_in]]) {
+    return float4(in.color.rgb * in.color.a, in.color.a);       // premultiplied
+}
+
 vertex SegOut segVert(uint vid [[vertex_id]], uint iid [[instance_id]],
                       const device Seg* segs [[buffer(0)]], constant Uniforms& U [[buffer(1)]]) {
     Seg g = segs[iid];
@@ -321,9 +341,10 @@ kernel void cymaticsKernel(device float4* P [[buffer(0)]], constant SimU& U [[bu
     float2 g = 2.0 * f * float2(fx, fy) / (2.0 * e);                    // ∇(f²)
     float amp = abs(f);
     float2 jitter = float2(rnd(i, U.frame * 2u), rnd(i, U.frame * 2u + 1u)) - 0.5;
+    // Reach (p0) scales how far grains are kicked, not how fast they settle: the figure must always form.
     float2 v = -g / (ks * ks) * 0.05 * U.speed
-             + jitter * (amp + 0.03) * (U.shake + U.beat * 2.5) * 0.12 / ks;
-    v *= U.dtScale * U.p0;                                              // p0 = Reach
+             + jitter * (amp + 0.01) * (U.shake + U.beat * 2.5) * 0.12 / ks * U.p0;
+    v *= U.dtScale;
     p += v;
     if (any(p < 0.0) || any(p > 1.0) || rnd(i, U.frame + 777u) < 0.0003) {
         p = float2(rnd(i, U.frame + 11u), rnd(i, U.frame + 23u));

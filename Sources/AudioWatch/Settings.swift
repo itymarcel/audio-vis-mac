@@ -4,7 +4,21 @@ import Observation
 
 enum VizMode: String, Codable, CaseIterable, Identifiable {
     case sphere, oscilloscope, snippet, vectorscope, halo, spectrogram, cymatics, flow
+    case attractor, harmonograph, drumhead, primitives, field, mushrooms
     var id: String { rawValue }
+
+    /// Newer, less polished modes: listed separately and marked "Experimental".
+    var isExperimental: Bool { [.attractor, .harmonograph, .drumhead, .primitives, .field, .mushrooms].contains(self) }
+    static var stable: [VizMode] { allCases.filter { !$0.isExperimental } }
+    static var experimental: [VizMode] { allCases.filter(\.isExperimental) }
+
+    /// Modes drawn as 3D surfaces that offer the Render choice (lines / shaded / fresnel).
+    var usesLook: Bool { self == .primitives || self == .mushrooms }
+
+    /// Saved modes that no longer exist fall back to Sphere instead of resetting every setting.
+    init(from decoder: Decoder) throws {
+        self = VizMode(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .sphere
+    }
 
     var title: String {
         switch self {
@@ -16,6 +30,12 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .spectrogram: "Spectrogram"
         case .cymatics: "Cymatics"
         case .flow: "Flow"
+        case .attractor: "Attractor"
+        case .harmonograph: "Harmonograph"
+        case .drumhead: "Drumhead"
+        case .primitives: "Primitives"
+        case .field: "Field"
+        case .mushrooms: "Mushrooms"
         }
     }
 
@@ -29,6 +49,12 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .spectrogram: "square.stack.3d.down.forward"
         case .cymatics: "circle.grid.cross"
         case .flow: "wind"
+        case .attractor: "atom"
+        case .harmonograph: "scribble.variable"
+        case .drumhead: "circle.circle"
+        case .primitives: "cube.transparent"
+        case .field: "circle.grid.3x3"
+        case .mushrooms: "leaf"
         }
     }
 
@@ -50,10 +76,20 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .halo: Detail(label: "Bands", range: 16...4096, keyPath: \.haloBands, format: "%.0f", isLog: true)
         case .spectrogram: Detail(label: "Bands", range: 64...2048, keyPath: \.spectroBands, format: "%.0f")
         case .cymatics, .flow: Detail(label: "Particles", range: 10_000...4_000_000, keyPath: \.particleCount, format: "%.0f", isLog: true)
+        case .attractor: Detail(label: "Time window (ms)", range: 5...200, keyPath: \.attractorMs, format: "%.0f ms")
+        case .harmonograph: Detail(label: "Swings", range: 2...10, keyPath: \.harmonoSwings, format: "%.1f")
+        case .primitives: Detail(label: "Density", range: 0.2...3, keyPath: \.primDensity, format: "%.1f×")
+        case .field: Detail(label: "Particles", range: 5_000...200_000, keyPath: \.fieldParticles, format: "%.0f", isLog: true)
+        case .mushrooms: Detail(label: "Mushrooms", range: 4...150, keyPath: \.shroomCount, format: "%.0f")
+        case .drumhead: Detail(label: "Points", range: 2_000...80_000, keyPath: \.drumPoints, format: "%.0f", isLog: true)
         }
     }
 
     /// Which shared settings affect this mode (others are greyed out in the panel).
+    /// Low latency swaps the long FFT for short ones above ~200 Hz. Modes whose look comes from fine spectral
+    /// detail (each Flow particle follows one narrow band; the spectrogram shows every bin) keep the full FFT.
+    var supportsLowLatency: Bool { self != .spectrogram && self != .flow }
+
     func uses(_ k: Knob) -> Bool {
         switch self {
         case .sphere: return ![.stereo].contains(k)
@@ -65,6 +101,10 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .spectrogram: return ![.style, .size, .persistence, .zoom, .stereo, .reach].contains(k)
         case .cymatics: return ![.style, .stereo, .mirror, .tilt].contains(k)
         case .flow: return ![.stereo, .mirror].contains(k)
+        case .attractor: return ![.floor, .tilt, .smoothing, .freqRange, .fft, .mirror, .stereo].contains(k)
+        case .harmonograph: return ![.stereo, .mirror, .floor, .tilt].contains(k)
+        case .drumhead, .field: return ![.stereo, .mirror].contains(k)
+        case .primitives, .mushrooms: return ![.stereo, .mirror, .style].contains(k)
         }
     }
 
@@ -78,13 +118,19 @@ enum VizMode: String, Codable, CaseIterable, Identifiable {
         case .spectrogram: "Scrolling frequency waterfall. Motion = scroll speed, Mirror puts bass in the centre."
         case .cymatics: "Sand on a vibrating Chladni plate. The dominant pitch picks the plate mode (low → simple figure, high → intricate); loudness and beats shake the sand."
         case .flow: "Particles drifting through curl noise. Each particle listens to one frequency band. Lines style = motion streaks."
+        case .attractor: "Delay embedding: each point is (x(t), x(t−τ), x(t−2τ)), with τ a quarter period of the dominant pitch. A pure tone draws a ring, a chord a knot, noise a cloud. Drag to orbit."
+        case .harmonograph: "A pendulum drawing machine tuned by the music: the strongest notes set the pendulums' frequency ratios. Consonant intervals draw calm closed figures, dissonant ones dense knots. Swings = how long each pendulum runs before it dies down."
+        case .primitives: "3D primitives conjured by the music: kicks bring spheres, tori and octahedra, snares cubes, pyramids and planes, hats lines, crosses and barcodes. Each appears, breathes with its band, then fades. Render: wireframe, shaded or fresnel. Density = how many."
+        case .field: "A ball of particles at rest, each on a spring to its home spot. Invisible spheres of different sizes and masses appear with the music, pull particles in and let them pile up on their surface, then vanish; the particles drift back. Springiness = how hard they want to go home."
+        case .mushrooms: "Glowing mushrooms sprout where the music hits, grow slowly in small steps on the hits in their own frequency range, glow with their own frequency band, release spores on beats, then wilt and fade. Mycelium threads connect them. Render switches between wireframe, shaded and glassy fresnel."
+        case .drumhead: "A circular drum skin in 3D. Each frequency band drives one of the membrane's real vibration modes (Bessel modes): bass the broad dome, treble the fine rings and petals. Drag to orbit."
         }
     }
 }
 
 extension VizSettings {
     /// Modes that build real 3D geometry and apply the camera orbit themselves; the others are tilted as a flat plane.
-    var isVolumetric: Bool { mode == .sphere || (mode == .oscilloscope && scopeShape == .ridgeline) }
+    var isVolumetric: Bool { mode == .sphere || mode.isExperimental || (mode == .oscilloscope && scopeShape == .ridgeline) }
 }
 
 enum Knob { case segmented, style, colorBy, gain, floor, tilt, smoothing, freqRange, size, glow, persistence, motion, zoom, stereo, mirror, fft, reach }
@@ -157,6 +203,15 @@ enum ScopeShape: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+enum SurfaceLook: String, Codable, CaseIterable, Identifiable {
+    case lines, shaded, fresnel
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+    init(from decoder: Decoder) throws {
+        self = SurfaceLook(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .lines
+    }
+}
+
 enum WarpStyle: String, Codable, CaseIterable, Identifiable {
     case tunnel, vortex, ripple, spin, kaleido, implode
     var id: String { rawValue }
@@ -202,8 +257,8 @@ struct VizSettings: Codable, Equatable {
     var persistence: Double = 0.25
     var motion: Double = 0.3
     var zoom: Double = 1
-    /// Global multiplier on how far things move/displace (sphere bulge, spoke length, particle steps, trace height).
-    var reach: Double = 1
+    /// Reach per mode (mode name → multiplier on how far things move/displace); missing = 1×.
+    var reachByMode: [String: Double] = [:]
     var stereo: Bool = false
     var mirror: Bool = false
 
@@ -222,6 +277,16 @@ struct VizSettings: Codable, Equatable {
     var vectorMs: Double = 50
     var haloBands: Double = 160
     var spectroBands: Double = 512
+    var attractorMs: Double = 30
+    var harmonoSwings: Double = 6
+    var drumPoints: Double = 20_000
+    var primDensity: Double = 1
+    var fieldParticles: Double = 60_000
+    var shroomCount: Double = 40
+    /// Render for surface modes (Primitives, Mushrooms).
+    var look: SurfaceLook = .lines
+    /// Field: how strongly particles are pulled back home (0 … 1).
+    var fieldSpring: Double = 0.4
 
     // Window
     // Screen (CRT treatment)
@@ -241,10 +306,12 @@ struct VizSettings: Codable, Equatable {
 
 @Observable
 final class SettingsStore {
+    // Keys keep the app's old name (AudioViz) so existing settings and presets carry over.
     private static let key = "AudioViz.settings.v2"
     private static let presetsKey = "AudioViz.presets.v1"
-    /// Debug runs (AUDIOVIZ_SETTINGS) never write anything back.
-    private static let persist = ProcessInfo.processInfo.environment["AUDIOVIZ_SETTINGS"] == nil
+    private static let presetCamerasKey = "AudioViz.presetCameras.v1"
+    /// Debug runs (AUDIOWATCH_SETTINGS) never write anything back.
+    private static let persist = ProcessInfo.processInfo.environment["AUDIOWATCH_SETTINGS"] == nil
 
     var s: VizSettings {
         didSet { if s != oldValue { save() } }
@@ -252,11 +319,15 @@ final class SettingsStore {
 
     /// Named looks. A preset stores every setting except the window ones (see `windowOnly`).
     private(set) var presets: [String: VizSettings] = [:]
+    /// The camera view (for the preset's mode) saved with each preset.
+    private(set) var presetCameras: [String: CameraState] = [:]
     var presetNames: [String] { presets.keys.sorted { $0.localizedStandardCompare($1) == .orderedAscending } }
 
     init() {
         s = Self.load()
         presets = Self.loadPresets()
+        if let data = UserDefaults.standard.data(forKey: Self.presetCamerasKey),
+           let cams = try? JSONDecoder().decode([String: CameraState].self, from: data) { presetCameras = cams }
     }
 
     func resetLook() {
@@ -269,23 +340,27 @@ final class SettingsStore {
 
     // MARK: - Presets
 
-    /// Creates or overwrites the preset `name` with the current settings.
-    func savePreset(_ name: String) {
+    /// Creates or overwrites the preset `name` with the current settings and camera view.
+    func savePreset(_ name: String, camera: CameraState) {
         let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !n.isEmpty else { return }
         presets[n] = s
+        presetCameras[n] = camera
         savePresets()
     }
 
     func deletePreset(_ name: String) {
         presets[name] = nil
+        presetCameras[name] = nil
         savePresets()
     }
 
-    func applyPreset(_ name: String) {
-        guard var p = presets[name] else { return }
+    /// Applies the preset's settings and returns its camera view (nil for presets saved before views were stored).
+    func applyPreset(_ name: String) -> CameraState? {
+        guard var p = presets[name] else { return nil }
         Self.keepWindow(from: s, into: &p)
         s = p
+        return presetCameras[name]
     }
 
     /// True when the current look matches the preset (window settings ignored).
@@ -304,6 +379,7 @@ final class SettingsStore {
     private func savePresets() {
         guard Self.persist else { return }
         if let data = try? JSONEncoder().encode(presets) { UserDefaults.standard.set(data, forKey: Self.presetsKey) }
+        if let data = try? JSONEncoder().encode(presetCameras) { UserDefaults.standard.set(data, forKey: Self.presetCamerasKey) }
     }
 
     private static func loadPresets() -> [String: VizSettings] {
@@ -323,8 +399,8 @@ final class SettingsStore {
         var saved: [String: Any] = [:]
         if let data = UserDefaults.standard.data(forKey: key),
            let d = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] { saved = d }
-        // Debug aid: AUDIOVIZ_SETTINGS='{"mode":"cymatics"}' overrides saved values for this run.
-        if let json = ProcessInfo.processInfo.environment["AUDIOVIZ_SETTINGS"]?.data(using: .utf8),
+        // Debug aid: AUDIOWATCH_SETTINGS='{"mode":"cymatics"}' overrides saved values for this run.
+        if let json = ProcessInfo.processInfo.environment["AUDIOWATCH_SETTINGS"]?.data(using: .utf8),
            let over = (try? JSONSerialization.jsonObject(with: json)) as? [String: Any] {
             saved.merge(over) { _, new in new }
         }
@@ -350,4 +426,13 @@ final class AppState {
     var textEditing = false
     @ObservationIgnored weak var window: NSWindow?
     @ObservationIgnored let camera = Camera()
+}
+
+extension VizSettings {
+    /// How far things move/displace in the current mode (sphere bulge, spoke length, particle steps, trace height).
+    /// Stored per mode, so turning it down for one mode doesn't shrink the others.
+    var reach: Double {
+        get { reachByMode[mode.rawValue] ?? 1 }
+        set { reachByMode[mode.rawValue] = newValue }
+    }
 }

@@ -1,11 +1,11 @@
-# AudioViz
+# AudioWatch
 
 A native macOS visualizer for whatever your Mac is playing, on any output device.
 It uses a Core Audio global process tap (macOS 14.2+), so no virtual audio driver is needed and the audio itself is never changed.
 
 ## Build & run
     ./build.sh
-    open build/AudioViz.app
+    open build/AudioWatch.app
 
 The first time it runs, allow **System Audio Recording** (System Settings › Privacy & Security ›
 Screen & System Audio Recording). The app is ad-hoc signed, so after a rebuild macOS may ask for this permission again.
@@ -20,13 +20,23 @@ Screen & System Audio Recording). The app is ad-hoc signed, so after a rebuild m
 7. **Cymatics**: GPU sand on a vibrating Chladni plate. The dominant pitch picks the plate mode (higher pitch → more intricate figure), and loudness and beats shake the sand.
 8. **Flow**: up to millions of particles in a curl-noise field. Each particle follows one frequency band; Lines style draws motion streaks.
 
-**Presets** (top of the settings panel): save the current look under a name, pick one to apply it, overwrite or delete it.
-Presets store every setting except Always on Top and Show FPS.
+**Experimental** (the flask button in the toolbar, Visualizer › Experimental, or the bottom of the Mode picker):
+- **Attractor**: delay embedding (Takens). The waveform is drawn as the 3D curve (x(t), x(t−τ), x(t−2τ)), with τ a quarter period of the dominant pitch. A pure tone traces a ring, a chord a knot, noise a cloud. Drag to orbit.
+- **Harmonograph**: a 3D harmonograph: lateral pendulums on x, y and z plus a rotary table, each a damped oscillator tuned to a note being played. Just intervals draw calm closed figures, tempered ones precess, clashing notes fill in. Swings (2–10) sets how long the pendulums run.
+- **Drumhead**: a circular drum skin in 3D. Each band drives one of the membrane's Bessel modes, J_m(j_mn·r)·cos(mθ), each oscillating at its own drum-frequency ratio.
+- **Primitives**: 3D primitives conjured by the music. Kicks bring spheres, tori, octahedra and helices; snares cubes, pyramids, planes and nested frames; hats rays, crosses and barcodes. **Render**: Lines strokes each one in edge by edge; Shaded draws lit solid surfaces; Fresnel draws glassy shapes with glowing rims. Detail = density.
+- **Field**: a box of particles at rest, each on a spring to its home spot. Invisible spheres of different sizes and masses appear with the music (kicks: big and heavy, hats: small and brief); particles are pulled toward them but can't enter, so they pile up into shells that reveal the spheres, then drift home when a sphere vanishes. **Springiness** sets how hard they pull back.
+- **Mushrooms**: up to 150 glowing mushrooms, from giants (sprouted by kicks) to tiny buttons (hats). Each grows slowly, in small eased steps on the hits in its own frequency range (big ones on kicks, medium on snares, tiny on hats), glows gently with its band, puffs spores on beats, then wilts and fades. All motion is eased or spring-smoothed. **Render**: Lines, Shaded or Fresnel.
 
-**Reach** (Shape & motion) is a global multiplier on how far things move: sphere bulge, halo spoke length, particle steps and trace height.
+All experimental modes are 3D: drag to orbit, scroll to zoom. The Style control only shows for modes it applies to.
+
+**Presets** (top of the settings panel): save the current look under a name, pick one to apply it, overwrite or delete it.
+Presets store every setting except Always on Top and Show FPS, plus the camera view (rotation, pan, zoom).
+
+**Reach** (Shape & motion) multiplies how far things move: sphere bulge, halo spoke length, particle steps and trace height. It is remembered per mode.
 **Low latency** (Response, on by default): a long FFT reacts late, because an onset only reaches full strength halfway into its window
 (~170 ms at 16384). With this on, the long FFT covers only the bass; above ~190 Hz it crossfades to 4096- and 2048-point FFTs,
-so a snare registers in ~20 ms instead of ~100 ms. Spectrogram always uses the single long FFT.
+so a snare registers in ~20 ms instead of ~100 ms. Spectrogram and Flow always use the single long FFT (their look comes from its fine detail).
 FFT size only affects the spectrum modes; Oscilloscope, Snippet and Vectorscope draw raw samples, so it's greyed out there.
 
 All modes share one settings panel (S): palette, colour-by, gain, noise floor, treble tilt, smoothing,
@@ -37,7 +47,7 @@ View controls (in the window, remembered per mode):
 - **Drag**: rotate. The sphere orbits in true 3D; the 2D modes tilt as a plane in perspective.
 - **Right-drag, ⌥/⇧-drag or two-finger scroll**: pan.
 - **Mouse wheel, pinch or ⌘-scroll**: zoom toward the cursor.
-- **Double-click, R or the ↺ HUD button**: reset the view.
+- **Double-click, R or the ↺ HUD button**: centre the view (rotation and pan); the zoom is kept.
 - **⌘-drag**: move the window.
 
 Other keys: Space freezes the frame, F toggles full screen, T keeps the window on top. Set Background opacity to 0
@@ -54,8 +64,9 @@ Everything is drawn on the GPU with Metal, with shaders compiled at runtime, so 
 
 ## Debugging
 Environment variables (debug runs never save settings):
-- `AUDIOVIZ_WAV=/path/file.wav` plays a file into the analyser instead of the system tap (`AUDIOVIZ_WAV_CHUNK=4096` simulates a bursty device).
-- `AUDIOVIZ_SETTINGS='{"mode":"oscilloscope","scopeShape":"circle"}'` overrides saved settings for that run.
-- `AUDIOVIZ_SNAPSHOT=/tmp/shot AUDIOVIZ_SNAPSHOT_FRAMES=10,240` writes `/tmp/shot-<frame>.png` and quits after the last one.
-- `AUDIOVIZ_TRACE=1` prints the audio playhead per frame.
+- `AUDIOWATCH_WAV=/path/file.wav` plays a file into the analyser instead of the system tap (`AUDIOWATCH_WAV_CHUNK=4096` simulates a bursty device).
+- `AUDIOWATCH_SETTINGS='{"mode":"oscilloscope","scopeShape":"circle"}'` overrides saved settings for that run.
+- `AUDIOWATCH_SNAPSHOT=/tmp/shot AUDIOWATCH_SNAPSHOT_FRAMES=10,240` writes `/tmp/shot-<frame>.png` and quits after the last one.
+- `AUDIOWATCH_TRACE=1` prints the audio playhead per frame.
+- `AUDIOWATCH_PERF=1` prints CPU build time and GPU time (ms) per frame.
 - Show FPS also reports the audio device's burst size and the playhead buffer.

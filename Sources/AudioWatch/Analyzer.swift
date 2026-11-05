@@ -26,7 +26,7 @@ final class Analyzer {
     /// Latency the playhead keeps behind the newest audio (ms), for the FPS overlay.
     private(set) var bufferMs: Double = 0
     private(set) var ioBurst: Double = 0
-    private static let trace = ProcessInfo.processInfo.environment["AUDIOVIZ_TRACE"] != nil
+    private static let trace = ProcessInfo.processInfo.environment["AUDIOWATCH_TRACE"] != nil
 
     private var fft: vDSP.FFT<DSPSplitComplex>
     private var window: [Float]
@@ -266,6 +266,45 @@ final class Analyzer {
     }
 
     // MARK: - Spectrum queries
+
+    /// Strongest spectral peaks (Hz, magnitude) between fLo and fHi, at least ~¾ semitone apart, loudest first.
+    /// Positions are refined by parabolic interpolation on the log magnitude.
+    func peaks(count: Int, fLo: Double = 40, fHi: Double = 4000) -> [(hz: Double, mag: Float)] {
+        let binHz = sampleRate / Double(fftSize)
+        let lo = max(2, Int(fLo / binHz)), hi = min(amp.count - 2, Int(fHi / binHz))
+        guard hi > lo else { return [] }
+        let top = amp[lo...hi].max() ?? 0
+        guard top > 1e-5 else { return [] }
+        var cand: [(hz: Double, mag: Float)] = []
+        for i in lo...hi where amp[i] > amp[i - 1] && amp[i] >= amp[i + 1] && amp[i] > top * 0.08 {
+            let l = log(amp[i - 1] + 1e-9), c = log(amp[i] + 1e-9), r = log(amp[i + 1] + 1e-9)
+            let d = l - 2 * c + r
+            let off = abs(d) > 1e-9 ? 0.5 * (l - r) / d : 0
+            cand.append((hz: (Double(i) + Double(max(-0.5, min(0.5, off)))) * binHz, mag: amp[i]))
+        }
+        cand.sort { $0.mag > $1.mag }
+        var out: [(hz: Double, mag: Float)] = []
+        for c in cand where out.allSatisfy({ abs(log2(c.hz / $0.hz)) > 0.06 }) {
+            out.append(c)
+            if out.count == count { break }
+        }
+        return out
+    }
+
+    /// Spectrum magnitude at `hz` (linear interpolation between bins).
+    func magnitude(at hz: Double) -> Float {
+        let c = hz / (sampleRate / Double(fftSize))
+        let i = Int(c)
+        guard i >= 1, i < amp.count - 1 else { return 0 }
+        let f = Float(c - Double(i))
+        return amp[i] * (1 - f) + amp[i + 1] * f
+    }
+
+    /// Mono samples of the newest `count` frames (oldest first), for waveform-shape modes.
+    func recentMono(_ count: Int) -> [Float] {
+        let n = min(count, snapSize)
+        return (snapSize - n..<snapSize).map { 0.5 * (snapL[$0] + snapR[$0]) }
+    }
 
     /// `count` log-spaced bands between the settings' min/max frequency, normalized 0…~1.5.
     func bands(count: Int, s: VizSettings) -> [Float] {

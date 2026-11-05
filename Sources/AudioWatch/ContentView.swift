@@ -118,7 +118,7 @@ struct MetalVizView: NSViewRepresentable {
 
 /// Metal view with in-window camera controls:
 /// drag = orbit, right-drag / ⌥-drag / ⇧-drag / two-finger scroll = pan, mouse wheel / pinch = zoom,
-/// double-click = reset, ⌘-drag = move the window.
+/// double-click = centre (zoom kept), ⌘-drag = move the window.
 final class DraggableMTKView: MTKView {
     var camera: Camera?
     private enum Drag { case none, orbit, pan }
@@ -131,7 +131,7 @@ final class DraggableMTKView: MTKView {
 
     override func mouseDown(with e: NSEvent) {
         if e.modifierFlags.contains(.command) { window?.performDrag(with: e); drag = .none; return }
-        if e.clickCount == 2 { camera?.reset(); drag = .none; return }
+        if e.clickCount == 2 { camera?.centre(); drag = .none; return }
         drag = e.modifierFlags.contains(.option) || e.modifierFlags.contains(.shift) ? .pan : .orbit
         NSCursor.closedHand.push()
     }
@@ -182,10 +182,20 @@ struct HUD: View {
             .pickerStyle(.segmented)
             .labelsHidden()
             .fixedSize()
-            Button { app.camera.reset() } label: {
+            Menu {
+                ForEach(VizMode.experimental) { m in
+                    Button { store.s.mode = m } label: { Label(m.title, systemImage: m.symbol) }
+                }
+            } label: {
+                Image(systemName: "flask").frame(width: 14)
+            }
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help(store.s.mode.isExperimental ? "Experimental: \(store.s.mode.title)" : "Experimental modes")
+            Button { app.camera.centre() } label: {
                 Image(systemName: "arrow.counterclockwise").frame(width: 14)
             }
-            .help("Reset view (R). Drag to rotate, right/⌥-drag or two-finger scroll to pan, wheel or pinch to zoom, double-click to reset, ⌘-drag to move the window.")
+            .help("Centre the view, keeping the zoom (R). Drag to rotate, right/⌥-drag or two-finger scroll to pan, wheel or pinch to zoom, double-click to centre, ⌘-drag to move the window.")
             Button { app.frozen.toggle() } label: {
                 Image(systemName: app.frozen ? "play.fill" : "pause.fill").frame(width: 14)
             }

@@ -20,8 +20,6 @@ final class HaloViz: Visualizer {
         let lw = min(40, max(0.5, 2 * .pi * r0 / slots * 0.55 * Float(s.size)))
         let dash: Float = s.segmented ? max(3, len / 22) : 0
 
-        f.circle(c, r0, rc.col(rc.phase, 0.25 + 0.4 * min(bass, 1)), max(1, rc.unit * 0.8))
-
         for i in 0..<n {
             let a = vals[i]
             let frac = (Double(i) + 0.5) / Double(n)

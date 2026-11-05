@@ -2,9 +2,9 @@
 import PackageDescription
 
 let package = Package(
-    name: "AudioViz",
+    name: "AudioWatch",
     platforms: [.macOS("14.2")],
     targets: [
-        .executableTarget(name: "AudioViz", path: "Sources/AudioViz")
+        .executableTarget(name: "AudioWatch", path: "Sources/AudioWatch")
     ]
 )
