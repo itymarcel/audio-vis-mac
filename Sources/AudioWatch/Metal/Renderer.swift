@@ -16,6 +16,7 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var spectroPipe: MTLRenderPipelineState!
     private var fadePipe: MTLRenderPipelineState!
     private var blurPipe: MTLRenderPipelineState!
+    private var padPipe: MTLRenderPipelineState!
     private var compositePipe: MTLRenderPipelineState!
     private var bandKernel: MTLComputePipelineState!
     private var pushKernel: MTLComputePipelineState!
@@ -60,6 +61,12 @@ final class Renderer: NSObject, MTKViewDelegate {
     private var spectroHead = 0
 
     private var paletteTex: MTLTexture?
+    private lazy var media = MediaLayer(device: device)
+    private var mediaBlurA: MTLTexture?, mediaBlurB: MTLTexture?
+    private lazy var blankTex: MTLTexture? = {
+        let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: .rgba8Unorm, width: 1, height: 1, mipmapped: false)
+        return device.makeTexture(descriptor: d)
+    }()
     private var paletteKind: PaletteKind?
 
 
@@ -117,6 +124,7 @@ final class Renderer: NSObject, MTKViewDelegate {
         spectroPipe = try pipe("fsVert", "spectroFrag", sceneFormat, .add)
         fadePipe = try pipe("fsVert", "fadeFrag", sceneFormat, .max)
         blurPipe = try pipe("fsVert", "blurFrag", sceneFormat, .none)
+        padPipe = try pipe("fsVert", "padFrag", sceneFormat, .none)
         compositePipe = try pipe("fsVert", "compositeFrag", drawableFormat, .none)
         bandKernel = try device.makeComputePipelineState(function: fn("bandKernel"))
         pushKernel = try device.makeComputePipelineState(function: fn("pushKernel"))
@@ -577,7 +585,47 @@ final class Renderer: NSObject, MTKViewDelegate {
             blur(bloomA, bloomB, SIMD2(0, spread / bh))
         }
 
-        // 3. Composite + CRT
+        // 3. Media layer (optionally blurred: downsample + two separable passes; smaller = blurrier)
+        media.update(path: s.mediaPath, speed: s.mediaSpeed)
+        var mediaTex: MTLTexture? = s.mediaPath.isEmpty ? nil : media.texture
+        var mediaPad = SIMD2<Float>()
+        if let src = mediaTex, s.mediaBlur > 0.005 {
+            let k = 1 + 7 * s.mediaBlur
+            let iw = max(16, min(1024, Int(Double(src.width) / k))), ih = max(16, Int(Double(iw) / Double(max(media.aspect, 0.01))))
+            // transparent margin wide enough for the blur to spread into
+            let padPx = Int((4 * (0.5 + 1.5 * s.mediaBlur) * 2.6).rounded(.up)) + 2
+            let w = iw + 2 * padPx, h = ih + 2 * padPx
+            mediaPad = SIMD2(Float(padPx) / Float(w), Float(padPx) / Float(h))
+            if mediaBlurA?.width != w || mediaBlurA?.height != h {
+                let d = MTLTextureDescriptor.texture2DDescriptor(pixelFormat: sceneFormat, width: w, height: h, mipmapped: false)
+                d.usage = [.renderTarget, .shaderRead]
+                d.storageMode = .private
+                mediaBlurA = device.makeTexture(descriptor: d)
+                mediaBlurB = device.makeTexture(descriptor: d)
+            }
+            if let a = mediaBlurA, let b = mediaBlurB {
+                let spread = Float(0.5 + 1.5 * s.mediaBlur)
+                let p = MTLRenderPassDescriptor()
+                p.colorAttachments[0].texture = b
+                p.colorAttachments[0].loadAction = .dontCare
+                p.colorAttachments[0].storeAction = .store
+                if let e = cmd.makeRenderCommandEncoder(descriptor: p) {
+                    var pad = mediaPad
+                    e.setRenderPipelineState(padPipe)
+                    e.setFragmentTexture(src, index: 0)
+                    e.setFragmentBytes(&pad, length: 8, index: 0)
+                    e.drawPrimitives(type: .triangle, vertexStart: 0, vertexCount: 3)
+                    e.endEncoding()
+                }
+                blur(b, a, SIMD2(spread / Float(w), 0))
+                blur(a, b, SIMD2(0, spread / Float(h)))
+                blur(b, a, SIMD2(spread * 1.6 / Float(w), 0))
+                blur(a, b, SIMD2(0, spread * 1.6 / Float(h)))
+                mediaTex = b
+            }
+        }
+
+        // 4. Composite + CRT
         let fp = MTLRenderPassDescriptor()
         fp.colorAttachments[0].texture = drawable.texture
         fp.colorAttachments[0].loadAction = .dontCare
@@ -593,6 +641,20 @@ final class Renderer: NSObject, MTKViewDelegate {
                 sceneGain: 1,
                 cornerR: Float(34 * s.vignette) * scale, time: Float(elapsed), pxScale: scale,
                 flickerRand: Float.random(in: 0...0.06) * Float(s.flicker))
+            C.grade = SIMD4(Float(s.brightness), Float(max(0.2, s.contrast)), Float(s.saturation), Float(s.hueRotate))
+            let pixel = 1 + Float(s.pixelate * s.pixelate) * 47 * scale
+            C.fx = SIMD4(Float(s.aberration) * 24 * scale, pixel > 1.5 ? pixel : 0,
+                         s.posterize > 0.01 ? Float((24 - 22 * s.posterize).rounded()) : 0, Float(s.invert))
+            if let tex = mediaTex {
+                let op = min(1, s.mediaOpacity + s.mediaPulse * Double(engine.analyzer.beatPulse))
+                C.media = SIMD4(s.mediaBlend.shaderIndex, Float(op), Float(s.mediaDisplace) * 140 * scale, s.mediaFit.shaderIndex)
+                C.media2 = SIMD4(media.aspect, mediaPad.x > 0 ? 1 : 0, mediaPad.x, mediaPad.y)
+                C.mediaXf = media.motion(s, analyzer: engine.analyzer, dt: dt, frozen: frozen, reset: app.mediaMotionReset)
+                C.mediaKal = SIMD4(s.mediaKaleido >= 1.5 ? Float(s.mediaKaleido.rounded()) : 0, s.mediaTile.shaderIndex, 0, 0)
+                enc.setFragmentTexture(tex, index: 2)
+            } else {
+                enc.setFragmentTexture(blankTex, index: 2)
+            }
             enc.setRenderPipelineState(compositePipe)
             enc.setFragmentTexture(cur, index: 0)
             enc.setFragmentTexture(bloomB, index: 1)

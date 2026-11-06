@@ -104,6 +104,12 @@ struct CompU {
     float glow; float scan; float grain; float vignette;
     float flicker; float bandY; float bgOpacity; float sceneGain;
     float cornerR; float time; float pxScale; float flickerRand;
+    float4 grade;    // brightness, contrast, saturation, hue (turns)
+    float4 fx;       // aberration px, pixel size px, posterize levels, invert
+    float4 media;    // blend (-1 = none), opacity, displace px, fit
+    float4 media2;   // media aspect, padded (blurred) texture flag, pad fraction x, y
+    float4 mediaXf;  // offset x, y (screen heights), scale, angle
+    float4 mediaKal; // kaleidoscope segments, tile mode
 };
 
 // ---------------------------------------------------------------- helpers
@@ -478,6 +484,14 @@ fragment float4 fadeFrag(FSOut in [[stage_in]], texture2d<float> prev [[texture(
     return prev.sample(linClamp, uv) * W.decay * edge;
 }
 
+/// Copies the media into the middle of a larger, transparent texture (premultiplied), leaving a margin for blur.
+fragment float4 padFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0)]], constant float2& pad [[buffer(0)]]) {
+    float2 m = (in.uv - pad) / (1.0 - 2.0 * pad);
+    if (any(m < 0.0) || any(m > 1.0)) return float4(0.0);
+    float4 t = src.sample(linClamp, m);
+    return float4(t.rgb * t.a, t.a);
+}
+
 fragment float4 blurFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0)]], constant float2& step [[buffer(0)]]) {
     const float w[5] = { 0.227027, 0.1945946, 0.1216216, 0.054054, 0.016216 };
     float4 c = src.sample(linClamp, in.uv) * w[0];
@@ -488,17 +502,125 @@ fragment float4 blurFrag(FSOut in [[stage_in]], texture2d<float> src [[texture(0
     return c;
 }
 
+/// Media texture coordinates for a screen uv, honouring fill / fit / stretch. Outside the picture → alpha 0.
+static float4 mediaAt(texture2d<float> tex, float2 uv, float screenAspect, constant CompU& C) {
+    // user transform, in aspect-correct screen space (1 = screen height): offset, rotate, scale, kaleidoscope
+    float2 p = (uv - 0.5) * float2(screenAspect, 1.0) - C.mediaXf.xy;
+    float ca = cos(C.mediaXf.w), sa = sin(C.mediaXf.w);
+    p = float2(ca * p.x + sa * p.y, -sa * p.x + ca * p.y) / max(C.mediaXf.z, 0.01);
+    if (C.mediaKal.x >= 2.0) {
+        float seg = 6.2831853 / C.mediaKal.x;
+        float a = atan2(p.y, p.x) + 31.415926;
+        a = fmod(a, seg);
+        a = min(a, seg - a);
+        p = length(p) * float2(cos(a), sin(a));
+    }
+    uv = p / float2(screenAspect, 1.0) + 0.5;
+
+    float ai = C.media2.x;
+    float2 s = float2(1.0);
+    int fit = int(C.media.w + 0.5);
+    if (fit == 0) s = screenAspect > ai ? float2(1.0, ai / screenAspect) : float2(screenAspect / ai, 1.0);
+    else if (fit == 1) s = screenAspect > ai ? float2(screenAspect / ai, 1.0) : float2(1.0, ai / screenAspect);
+    float2 m = (uv - 0.5) * s + 0.5;
+    int tile = int(C.mediaKal.y + 0.5);
+    if (tile == 1) m = fract(m);
+    else if (tile == 2) m = 1.0 - abs(fract(m * 0.5) * 2.0 - 1.0);
+    if (C.media2.y > 0.5) {
+        // blurred copy: the picture sits inside a transparent margin, so its edges blur out too (premultiplied)
+        float2 pf = C.media2.zw;
+        float2 mp = pf + m * (1.0 - 2.0 * pf);
+        if (tile == 0) {
+            if (any(mp < 0.0) || any(mp > 1.0)) return float4(0.0);
+        } else {
+            mp = pf + m * (1.0 - 2.0 * pf);   // tiles stay seamless: sample inside the picture only
+        }
+        return tex.sample(linClamp, mp);
+    }
+    if (tile == 0 && (any(m < 0.0) || any(m > 1.0))) return float4(0.0);
+    float4 t = tex.sample(linClamp, m);
+    return float4(t.rgb, 1.0) * t.a;
+}
+
+static float luma(float3 c) { return dot(c, float3(0.2126, 0.7152, 0.0722)); }
+
 fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[texture(0)]],
                               texture2d<float> bloom [[texture(1)]],
+                              texture2d<float> mediaTex [[texture(2)]],
                               constant CompU& C [[buffer(0)]]) {
     float2 px = in.pos.xy;
     float2 size = float2(scene.get_width(), scene.get_height());
-    float3 c = scene.read(uint2(px)).rgb * C.sceneGain;
-    if (C.glow > 0.0) c += bloom.sample(linClamp, in.uv).rgb * C.glow * 2.2 * C.sceneGain;
+    float aspect = size.x / size.y;
+    bool hasMedia = C.media.x >= 0.0;
+
+    // where to read the scene: pixelate, then displace by the media's brightness
+    float2 sp = px;
+    if (C.fx.y > 1.0) sp = (floor(px / C.fx.y) + 0.5) * C.fx.y;
+    if (hasMedia && C.media.z > 0.0) {
+        float2 e = float2(3.0) / size;
+        float2 uv0 = sp / size;
+        float lx = luma(mediaAt(mediaTex, uv0 + float2(e.x, 0), aspect, C).rgb) - luma(mediaAt(mediaTex, uv0 - float2(e.x, 0), aspect, C).rgb);
+        float ly = luma(mediaAt(mediaTex, uv0 + float2(0, e.y), aspect, C).rgb) - luma(mediaAt(mediaTex, uv0 - float2(0, e.y), aspect, C).rgb);
+        float l0 = luma(mediaAt(mediaTex, uv0, aspect, C).rgb);
+        // edges push sideways, brightness pushes outward from the centre
+        sp += (float2(lx, ly) * 4.0 + normalize(uv0 - 0.5 + 1e-4) * (l0 - 0.5)) * C.media.z;
+    }
+    float2 uv = sp / size;
+    float3 c;
+    if (C.fx.x > 0.0) {
+        float2 o = (uv - 0.5) * 2.0 * C.fx.x / size;
+        c = float3(scene.sample(linClamp, uv + o).r, scene.sample(linClamp, uv).g, scene.sample(linClamp, uv - o).b);
+        if (C.glow > 0.0) c += float3(bloom.sample(linClamp, uv + o).r, bloom.sample(linClamp, uv).g, bloom.sample(linClamp, uv - o).b) * C.glow * 2.2;
+    } else {
+        c = scene.sample(linClamp, uv).rgb;
+        if (C.glow > 0.0) c += bloom.sample(linClamp, uv).rgb * C.glow * 2.2;
+    }
+    c *= C.sceneGain;
     c = select(c, float3(0.0), isnan(c) || isinf(c));   // never let a bad sample poison the frame
     // Hue-preserving tonemap: compress brightness by the max channel so dense overlaps keep their palette colour
     float m = max(c.r, max(c.g, c.b));
     if (m > 1e-5) c *= (1.0 - exp(-m * 1.3)) / m;
+
+    // media layer
+    float mediaAlpha = 0.0;
+    if (hasMedia) {
+        float4 mt = mediaAt(mediaTex, (C.fx.y > 1.0 ? sp : px) / size, aspect, C);
+        float3 mi = mt.rgb;
+        float op = C.media.y;
+        float lit = clamp(max(c.r, max(c.g, c.b)), 0.0, 1.0);
+        switch (int(C.media.x + 0.5)) {
+            case 0: c += mi * op * (1.0 - lit); mediaAlpha = op * mt.a; break;                       // behind
+            case 1: c += mi * op; mediaAlpha = op * mt.a; break;                                     // add
+            case 2: c = mix(c, 1.0 - (1.0 - c) * (1.0 - mi), op); mediaAlpha = op * mt.a; break;     // screen
+            case 3: {                                                                                // overlay
+                float3 ov = select(1.0 - 2.0 * (1.0 - mi) * (1.0 - c), 2.0 * mi * c, mi < 0.5);
+                c = mix(c, ov + c * 0.35, op); mediaAlpha = op * mt.a; break;
+            }
+            case 4: c = mix(c, c * mi, op); break;                                                   // multiply
+            case 5: c *= mix(1.0, luma(mi), op); break;                                              // mask
+            case 6: c = mix(c, abs(c - mi), op); mediaAlpha = op * mt.a; break;                      // difference
+            default: break;                                                                          // hidden
+        }
+    }
+
+    // colour grade
+    c *= exp2(C.grade.x * 1.5);
+    if (C.grade.y != 1.0) {
+        // contrast curve through (0,0), (½,½), (1,1): black stays black, so transparent windows stay clear
+        float3 x = clamp(c, 0.0, 1.0);
+        float3 lo = 0.5 * pow(2.0 * x, C.grade.y);
+        float3 hi = 1.0 - 0.5 * pow(2.0 * (1.0 - x), C.grade.y);
+        c = select(hi, lo, x < 0.5) + max(c - 1.0, 0.0);
+    }
+    c = max(mix(float3(luma(c)), c, C.grade.z), 0.0);
+    if (C.grade.w != 0.0) {
+        float a = C.grade.w * 6.2831853;
+        float3 k = float3(0.57735);
+        c = c * cos(a) + cross(k, c) * sin(a) + k * dot(k, c) * (1.0 - cos(a));
+        c = max(c, 0.0);
+    }
+    if (C.fx.z >= 2.0) c = floor(c * (C.fx.z - 1.0) + 0.5) / (C.fx.z - 1.0);
+    if (C.fx.w > 0.0) c = mix(c, 1.0 - min(c, 1.0), C.fx.w);
 
     // rolling refresh band
     float bd = (in.uv.y - C.bandY) / 0.08;
@@ -515,7 +637,7 @@ fragment float4 compositeFrag(FSOut in [[stage_in]], texture2d<float> scene [[te
     // background colour underneath the (additive) light
     float lit = clamp(max(c.r, max(c.g, c.b)), 0.0, 1.0);
     c += C.bg.rgb * C.bgOpacity * (1.0 - lit);
-    float alpha = lit + C.bgOpacity * (1.0 - lit);
+    float alpha = max(lit + C.bgOpacity * (1.0 - lit), mediaAlpha);
     // vignette
     float2 q = (in.uv - 0.5) * float2(size.x / size.y, 1.0);
     c *= 1.0 - C.vignette * 0.85 * smoothstep(0.3, 1.0, length(q));

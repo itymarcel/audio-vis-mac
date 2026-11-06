@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import UniformTypeIdentifiers
 
 /// Compact native settings panel.
 struct SettingsPanel: View {
@@ -10,6 +11,8 @@ struct SettingsPanel: View {
 
     var body: some View {
         Form {
+            PresetSection(store: store, app: app)
+
             Section("Mode") {
                 Picker("Mode", selection: $store.s.mode) {
                     ForEach(VizMode.stable) { Label($0.title, systemImage: $0.symbol).tag($0) }
@@ -48,8 +51,6 @@ struct SettingsPanel: View {
                         .help("How strongly particles are pulled back to their home spot. Low = slow, lazy return; high = snappy.")
                 }
             }
-
-            PresetSection(store: store, app: app)
 
             Section("Colour") {
                 Picker("Palette", selection: $store.s.palette) {
@@ -121,6 +122,28 @@ struct SettingsPanel: View {
                 SliderRow("Vignette", $store.s.vignette, 0...1, "%.2f")
                 SliderRow("Flicker", $store.s.flicker, 0...1, "%.2f")
             }
+
+            Section("Post-processing") {
+                SliderRow("Brightness", $store.s.brightness, -1...1, "%+.2f")
+                SliderRow("Contrast", $store.s.contrast, 0.2...2, "%.2f")
+                SliderRow("Saturation", $store.s.saturation, 0...2, "%.2f")
+                SliderRow("Hue", $store.s.hueRotate, 0...1, "%.2f")
+                    .help("Rotates every colour around the colour wheel (applied after everything else).")
+                SliderRow("Aberration", $store.s.aberration, 0...1, "%.2f")
+                    .help("Chromatic aberration: red and blue drift apart towards the edges, like a cheap lens.")
+                SliderRow("Pixelate", $store.s.pixelate, 0...1, "%.2f")
+                SliderRow("Posterize", $store.s.posterize, 0...1, "%.2f")
+                    .help("Fewer colour levels: banded, print-like colours.")
+                SliderRow("Invert", $store.s.invert, 0...1, "%.2f")
+                Button("Reset post-processing") {
+                    let d = VizSettings()
+                    store.s.brightness = d.brightness; store.s.contrast = d.contrast; store.s.saturation = d.saturation
+                    store.s.hueRotate = d.hueRotate; store.s.aberration = d.aberration; store.s.pixelate = d.pixelate
+                    store.s.posterize = d.posterize; store.s.invert = d.invert
+                }
+            }
+
+            MediaSection(store: store, app: app)
 
             Section("Window") {
                 ColorPicker("Background", selection: bgColor, supportsOpacity: false)
@@ -326,5 +349,121 @@ struct PresetSection: View {
         guard !n.isEmpty else { return }
         store.savePreset(n, camera: app.camera.state(for: store.s.mode))
         selected = n
+    }
+}
+
+/// An image or video combined with the visuals.
+private struct MediaSection: View {
+    @Bindable var store: SettingsStore
+    let app: AppState
+
+    private var path: String { store.s.mediaPath }
+    private var isVideo: Bool {
+        UTType(filenameExtension: URL(fileURLWithPath: path).pathExtension).map {
+            $0.conforms(to: .movie) || $0.conforms(to: .audiovisualContent)
+        } ?? false
+    }
+
+    @ViewBuilder var body: some View {
+        Section("Media layer") {
+            HStack {
+                Button(path.isEmpty ? "Choose image or video…" : "Change…") { choose() }
+                if !path.isEmpty {
+                    Image(systemName: isVideo ? "film" : "photo").foregroundStyle(.secondary)
+                    Text(URL(fileURLWithPath: path).lastPathComponent)
+                        .lineLimit(1).truncationMode(.middle)
+                        .foregroundStyle(FileManager.default.fileExists(atPath: path) ? .primary : Color.red)
+                        .help(path)
+                    Spacer()
+                    Button { store.s.mediaPath = "" } label: { Image(systemName: "xmark.circle.fill") }
+                        .buttonStyle(.borderless)
+                        .help("Remove the media")
+                }
+            }
+            if path.isEmpty {
+                Hint("Combine a picture or a looping video with the visuals: behind them, blended in, as a mask, or as a warp map. Videos play muted.")
+            } else {
+                Picker("Blend", selection: $store.s.mediaBlend) {
+                    ForEach(MediaBlend.allCases) { Text($0.title).tag($0) }
+                }
+                Hint(store.s.mediaBlend.hint)
+                Picker("Fit", selection: $store.s.mediaFit) {
+                    ForEach(MediaFit.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                if store.s.mediaBlend != .hidden {
+                    SliderRow("Opacity", $store.s.mediaOpacity, 0...1, "%.2f")
+                    SliderRow("Beat pulse", $store.s.mediaPulse, 0...1, "%.2f")
+                        .help("Each detected beat flashes the media's opacity up by this much.")
+                }
+                SliderRow("Blur", $store.s.mediaBlur, 0...1, "%.2f")
+                    .help("Softens the media. Also smooths the Displace warp.")
+                SliderRow("Displace", $store.s.mediaDisplace, 0...1, "%.2f")
+                    .help("Warps the visuals using the media as a map: edges push sideways, bright parts push outward.")
+                if isVideo {
+                    SliderRow("Speed", $store.s.mediaSpeed, 0...4, "%.2f×")
+                        .help("Playback speed (0 = paused). Can be driven by the music in the Nodes window.")
+                }
+            }
+        }
+        if !path.isEmpty {
+            Section("Media transform") {
+                SliderRow("Scale", logScale, log10(0.1)...log10(8)) { String(format: "%.2f×", store.s.mediaScale) }
+                SliderRow("X", $store.s.mediaX, -1...1, "%+.2f")
+                SliderRow("Y", $store.s.mediaY, -1...1, "%+.2f")
+                SliderRow("Rotate", $store.s.mediaRotate, 0...1) { String(format: "%.0f°", store.s.mediaRotate * 360) }
+                Picker("Tile", selection: $store.s.mediaTile) {
+                    ForEach(MediaTile.allCases) { Text($0.title).tag($0) }
+                }
+                .pickerStyle(.segmented)
+                .help("Repeat the media to fill the screen when it's scaled down or moved. Mirror flips every other copy, so the seams disappear.")
+                SliderRow("Kaleido", $store.s.mediaKaleido, 0...16) {
+                    store.s.mediaKaleido < 1.5 ? "off" : String(format: "%.0f", store.s.mediaKaleido.rounded())
+                }
+                .help("Folds the media into a kaleidoscope with this many mirrored segments.")
+                Button("Reset transform") {
+                    let d = VizSettings()
+                    store.s.mediaScale = d.mediaScale; store.s.mediaX = d.mediaX; store.s.mediaY = d.mediaY
+                    store.s.mediaRotate = d.mediaRotate; store.s.mediaTile = d.mediaTile; store.s.mediaKaleido = d.mediaKaleido
+                    app.mediaMotionReset += 1
+                }
+            }
+            Section("Media motion") {
+                SliderRow("Drift", $store.s.mediaDrift, 0...1, "%.2f")
+                    .help("Scrolls the media steadily. Turn on Tile for an endless scroll.")
+                SliderRow("Direction", $store.s.mediaDriftDir, 0...1) { String(format: "%.0f°", store.s.mediaDriftDir * 360) }
+                SliderRow("Spin", $store.s.mediaSpin, -1...1, "%+.2f")
+                SliderRow("Wander", $store.s.mediaWander, 0...1, "%.2f")
+                    .help("A slow, aimless pan, zoom and tilt over the picture (Ken Burns).")
+                SliderRow("Beat zoom", $store.s.mediaBeatZoom, 0...1, "%.2f")
+                    .help("Each beat punches the media in, then it eases back.")
+                SliderRow("Breathe", $store.s.mediaBreathe, 0...1, "%.2f")
+                    .help("Scale follows the bass level.")
+                SliderRow("Shake", $store.s.mediaShake, 0...1, "%.2f")
+                    .help("Snares and hats jolt the media off-centre; it wobbles back.")
+                SliderRow("Beat jump", $store.s.mediaJump, 0...1, "%.2f")
+                    .help("Chance per beat of a cut: a video jumps to a random moment, a picture to a new spot and orientation.")
+                Button("Stop all motion") {
+                    let d = VizSettings()
+                    store.s.mediaDrift = d.mediaDrift; store.s.mediaSpin = d.mediaSpin; store.s.mediaWander = d.mediaWander
+                    store.s.mediaBeatZoom = d.mediaBeatZoom; store.s.mediaBreathe = d.mediaBreathe
+                    store.s.mediaShake = d.mediaShake; store.s.mediaJump = d.mediaJump
+                    app.mediaMotionReset += 1   // and put back what spin / drift / wander had moved
+                }
+            }
+        }
+    }
+
+    private var logScale: Binding<Double> {
+        Binding(get: { log10(max(0.1, store.s.mediaScale)) },
+                set: { store.s.mediaScale = (pow(10, $0) * 100).rounded() / 100 })
+    }
+
+    private func choose() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.image, .movie, .audiovisualContent]
+        panel.allowsMultipleSelection = false
+        panel.message = "Choose an image or a video to combine with the visuals"
+        if panel.runModal() == .OK, let url = panel.url { store.s.mediaPath = url.path }
     }
 }

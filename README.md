@@ -54,6 +54,17 @@ Other keys: Space freezes the frame, F toggles full screen, T keeps the window o
 to get a see-through overlay.
 
 
+## Post-processing & media layer (Settings)
+
+**Post-processing** grades the final image: Brightness, Contrast (a curve that keeps black black, so transparent windows stay clear), Saturation, Hue, Chromatic aberration, Pixelate, Posterize and Invert.
+
+**Media layer**: choose an image or a video (videos loop, muted, with a Speed control). *Blend*: Behind, Add, Screen, Overlay, Multiply, Mask (visuals only show where the media is bright), Difference, or Hidden. *Fit*: Fill, Fit, Stretch. *Opacity*, *Blur* (also smooths the Displace warp), *Beat pulse* (beats flash the opacity) and *Displace* (warps the visuals with the media as a map: edges push sideways, bright parts push outward; works with Hidden too). The file path is stored, so presets remember their media.
+
+**Media transform**: Scale, X, Y, Rotate, Tile (Off / Repeat / Mirror, mirror hides the seams) and Kaleido (fold into 2–16 mirrored segments).
+**Media motion**: Drift (steady scroll in a Direction; endless with Tile), Spin, Wander (slow Ken Burns pan / zoom / tilt), Beat zoom (beats punch the media in), Breathe (scale follows the bass), Shake (snares and hats jolt it off-centre, it wobbles back), Beat jump (chance per beat of a cut: a video jumps to a random moment, a picture to a new spot and orientation).
+
+All of these sliders are also targets in the Nodes window.
+
 ## Nodes (N, or the HUD's node button)
 
 A separate window with a node editor that connects the music to any setting. Right-click the dotted grid to add a node, drag from a node's output (right dot) to another node's input (left dot), drag a connected input away to unplug or re-route it. Drag a header to move a node, drag the background to pan, select a node and press ⌫ to delete it (or right-click it: Duplicate / Disconnect / Delete). Numbers are scrubbed by dragging sideways (⌥ = fine); double-click one to type a value (Enter commits, Escape cancels). Constant and Map range use plain number boxes with no limits. Each node shows its live output value and a level bar.

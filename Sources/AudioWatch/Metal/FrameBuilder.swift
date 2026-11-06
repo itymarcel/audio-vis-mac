@@ -56,6 +56,18 @@ struct CompositeUniforms {
     var glow: Float, scan: Float, grain: Float, vignette: Float
     var flicker: Float, bandY: Float, bgOpacity: Float, sceneGain: Float
     var cornerR: Float, time: Float, pxScale: Float, flickerRand: Float
+    /// brightness, contrast, saturation, hue rotation (turns)
+    var grade = SIMD4<Float>(0, 1, 1, 0)
+    /// aberration (px at the edge), pixel size (px, ≤1 = off), posterize levels (0 = off), invert
+    var fx = SIMD4<Float>()
+    /// blend mode index (−1 = no media), opacity, displacement (px), fit index
+    var media = SIMD4<Float>(-1, 0, 0, 0)
+    /// media aspect (w/h)
+    var media2 = SIMD4<Float>(1, 0, 0, 0)
+    /// media transform: offset x, y (screen heights), scale, angle (radians)
+    var mediaXf = SIMD4<Float>(0, 0, 1, 0)
+    /// kaleidoscope segments (<2 = off), tile mode
+    var mediaKal = SIMD4<Float>()
 }
 
 struct WarpUniforms { var decay: Float, zoom: Float, rot: Float, swirl: Float, ripple: Float, kaleido: Float, time: Float, aspect: Float }

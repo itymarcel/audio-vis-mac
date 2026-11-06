@@ -212,6 +212,66 @@ enum SurfaceLook: String, Codable, CaseIterable, Identifiable {
     }
 }
 
+/// How the media layer (image / video) is combined with the visuals.
+enum MediaBlend: String, Codable, CaseIterable, Identifiable {
+    case background, add, screen, overlay, multiply, mask, difference, hidden
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .background: "Behind"
+        case .add: "Add"
+        case .screen: "Screen"
+        case .overlay: "Overlay"
+        case .multiply: "Multiply"
+        case .mask: "Mask"
+        case .difference: "Difference"
+        case .hidden: "Hidden (warp only)"
+        }
+    }
+    var hint: String {
+        switch self {
+        case .background: "The media sits behind the visuals."
+        case .add: "Media light is added on top of the visuals."
+        case .screen: "Like Add, but softer: never blows out to white."
+        case .overlay: "The visuals light up and tint the media (contrasty, like the Photoshop mode)."
+        case .multiply: "The visuals are tinted by the media; dark parts of the media hide them."
+        case .mask: "The visuals only show where the media is bright."
+        case .difference: "Colours invert where visuals and media overlap."
+        case .hidden: "The media isn't shown; use it only to warp the visuals with Displace."
+        }
+    }
+    var shaderIndex: Float { Float(Self.allCases.firstIndex(of: self) ?? 0) }
+    init(from decoder: Decoder) throws {
+        self = MediaBlend(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .background
+    }
+}
+
+enum MediaTile: String, Codable, CaseIterable, Identifiable {
+    case off, repeating, mirror
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .off: "Off"
+        case .repeating: "Repeat"
+        case .mirror: "Mirror"
+        }
+    }
+    var shaderIndex: Float { Float(Self.allCases.firstIndex(of: self) ?? 0) }
+    init(from decoder: Decoder) throws {
+        self = MediaTile(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .off
+    }
+}
+
+enum MediaFit: String, Codable, CaseIterable, Identifiable {
+    case fill, fit, stretch
+    var id: String { rawValue }
+    var title: String { rawValue.capitalized }
+    var shaderIndex: Float { Float(Self.allCases.firstIndex(of: self) ?? 0) }
+    init(from decoder: Decoder) throws {
+        self = MediaFit(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .fill
+    }
+}
+
 enum WarpStyle: String, Codable, CaseIterable, Identifiable {
     case tunnel, vortex, ripple, spin, kaleido, implode
     var id: String { rawValue }
@@ -289,6 +349,42 @@ struct VizSettings: Codable, Equatable {
     var fieldSpring: Double = 0.4
     /// The node patch (Nodes window): music features → modifiers → parameters.
     var nodes = NodeGraph()
+
+    // Post-processing (colour grade + effects on the final image)
+    var brightness: Double = 0
+    var contrast: Double = 1
+    var saturation: Double = 1
+    var hueRotate: Double = 0
+    var aberration: Double = 0
+    var pixelate: Double = 0
+    var posterize: Double = 0
+    var invert: Double = 0
+
+    // Media layer (an image or video file combined with the visuals)
+    var mediaPath: String = ""
+    var mediaBlend: MediaBlend = .background
+    var mediaFit: MediaFit = .fill
+    var mediaOpacity: Double = 0.6
+    var mediaDisplace: Double = 0
+    var mediaBlur: Double = 0
+    // media transform
+    var mediaScale: Double = 1
+    var mediaX: Double = 0
+    var mediaY: Double = 0
+    var mediaRotate: Double = 0
+    var mediaTile: MediaTile = .off
+    var mediaKaleido: Double = 0
+    // media motion
+    var mediaDrift: Double = 0
+    var mediaDriftDir: Double = 0
+    var mediaSpin: Double = 0
+    var mediaWander: Double = 0
+    var mediaBeatZoom: Double = 0
+    var mediaBreathe: Double = 0
+    var mediaShake: Double = 0
+    var mediaJump: Double = 0
+    var mediaSpeed: Double = 1
+    var mediaPulse: Double = 0
 
     // Window
     // Screen (CRT treatment)
@@ -427,6 +523,8 @@ final class AppState {
     var status: String?
     /// While a text field is being edited, single-key shortcuts are switched off so typing works.
     var textEditing = false
+    /// Bumped by the media "Stop all motion" / "Reset transform" buttons: clears accumulated spin, drift, wander…
+    @ObservationIgnored var mediaMotionReset = 0
     @ObservationIgnored weak var window: NSWindow?
     @ObservationIgnored let camera = Camera()
 }
